@@ -29,7 +29,7 @@ function FieldLabel({ className, ...props }: React.ComponentProps<"label">) {
   return (
     <label
       data-slot="field-label"
-      className={cn("text-xs font-medium tracking-[0.18em] uppercase", className)}
+      className={cn("text-xs font-medium text-foreground/90", className)}
       {...props}
     />
   )

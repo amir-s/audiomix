@@ -1,3 +1,6 @@
+import { Queue02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { AudioSection, formatMilliseconds } from "@/lib/audio";
 
@@ -12,10 +15,47 @@ type AudioWaveformProps = {
   activeSectionId: string | null;
   activeSectionProgress: number;
   pendingSectionId: string | null;
-  onSectionSelect: (section: AudioSection) => void;
+  onSectionSelect: (
+    section: AudioSection,
+    options?: { instant?: boolean }
+  ) => void;
   disabled?: boolean;
   emptyMessage: string;
 };
+
+function getMaxSectionsPerRow(width: number | null) {
+  if (width === null) {
+    return 4;
+  }
+
+  if (width < 640) {
+    return 1;
+  }
+
+  if (width < 960) {
+    return 2;
+  }
+
+  if (width < 1440) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function chunkItems<T>(items: T[], chunkSize: number) {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+
+  return chunks;
+}
 
 export function AudioWaveform({
   peaks,
@@ -30,11 +70,40 @@ export function AudioWaveform({
   disabled = false,
   emptyMessage,
 }: AudioWaveformProps) {
+  const gridContainerRef = useRef<HTMLDivElement | null>(null);
+  const [gridContainerWidth, setGridContainerWidth] = useState<number | null>(null);
   const normalizedDuration = durationSec > 0 ? durationSec : 1;
   const trimWidth =
     trimSec && trimSec > 0
       ? Math.min(100, (trimSec / normalizedDuration) * 100)
       : 0;
+  const gridColumns = getMaxSectionsPerRow(gridContainerWidth);
+  const sectionRows = chunkItems(sections, gridColumns);
+
+  useEffect(() => {
+    const element = gridContainerRef.current;
+
+    if (!element) {
+      return;
+    }
+
+    setGridContainerWidth(element.clientWidth);
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      setGridContainerWidth(entry?.contentRect.width ?? element.clientWidth);
+    });
+
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   function getSectionPeaks(section: AudioSection) {
     if (peaks.length === 0) {
@@ -59,7 +128,7 @@ export function AudioWaveform({
   function renderWaveformLines(
     sectionPeaks: number[],
     strokeWidth: number,
-    colorClassName = "text-foreground/70",
+    colorClassName = "text-foreground/44",
   ) {
     if (sectionPeaks.length === 0) {
       return null;
@@ -80,7 +149,7 @@ export function AudioWaveform({
           return (
             <line
               key={`peak-${index}`}
-              className="text-foreground/70"
+              className="text-foreground/44"
               stroke="currentColor"
               strokeLinecap="round"
               strokeWidth={strokeWidth}
@@ -109,63 +178,116 @@ export function AudioWaveform({
   ) {
     const isActive = section.id === activeSectionId;
     const isPending = section.id === pendingSectionId;
+    const isQueueable = !disabled && !isActive && !isPending;
     const progress = isActive ? activeSectionProgress : 0;
-    const progressWidth = `${Math.max(0, Math.min(1, progress)) * 100}%`;
+    const clampedProgress = Math.max(0, Math.min(1, progress));
+    const progressWidth = `${clampedProgress * 100}%`;
+    const progressMarkerLeft = `calc(${progressWidth} - 1px)`;
+    const showRange = !compact || isActive || isPending;
+
+    function handleClick(event: MouseEvent<HTMLButtonElement>) {
+      onSectionSelect(section, { instant: event.metaKey });
+    }
 
     return (
       <button
         key={section.id}
         aria-pressed={isActive}
+        data-waveform-section="true"
         className={cn(
-          "absolute overflow-hidden text-left outline-none transition-colors focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring/40",
-          compact ? "inset-y-0 border-r border-border/80 px-2 py-3" : "inset-0 px-2 py-1.5",
+          "group/section absolute overflow-hidden text-left outline-none transition-colors focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring/40",
+          compact
+            ? "inset-y-0 cursor-pointer border-r border-border/50 px-1.5 py-2"
+            : "inset-0 cursor-pointer px-2 py-1.5",
           className,
           isActive &&
-            "z-10 bg-emerald-950/12 text-foreground ring-2 ring-inset ring-emerald-900/90",
+            "z-10 bg-emerald-500/16 text-foreground ring-2 ring-inset ring-emerald-300/75",
           !isActive &&
             isPending &&
-            "z-10 bg-red-950/12 text-foreground ring-2 ring-inset ring-red-900/90",
-          !isActive && !isPending && "bg-background/10 hover:bg-accent/50",
+            "z-10 bg-amber-400/14 text-foreground ring-2 ring-inset ring-amber-300/80",
+          !isActive &&
+            !isPending &&
+            "bg-background/5 hover:bg-background/10 focus-visible:bg-background/10",
+          disabled && "cursor-default",
         )}
         disabled={disabled}
-        onClick={() => onSectionSelect(section)}
+        onClick={handleClick}
         style={style}
         type="button"
       >
-        {progress > 0 ? (
+        {!isActive && !isPending ? (
           <div
             aria-hidden="true"
-            className="absolute inset-y-0 left-0 bg-emerald-950/16"
-            style={{ width: progressWidth }}
+            className="absolute inset-0 bg-black/0 opacity-0 transition-opacity duration-150 group-hover/section:opacity-100 group-hover/section:bg-black/38 group-focus-visible/section:opacity-100 group-focus-visible/section:bg-black/38"
           />
         ) : null}
 
-        <div className="relative z-10 flex h-full min-w-0 flex-col justify-between">
+        {progress > 0 ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="absolute inset-y-0 left-0 bg-emerald-400/28"
+              style={{ width: progressWidth }}
+            />
+            <div
+              aria-hidden="true"
+              className="absolute inset-y-1 z-10 w-0.5 rounded-full bg-emerald-200 shadow-[0_0_12px_rgba(167,243,208,0.85)]"
+              style={{ left: progressMarkerLeft }}
+            />
+          </>
+        ) : null}
+
+        {isPending ? (
+          <div
+            aria-hidden="true"
+            className="absolute inset-x-0 top-0 h-1 bg-amber-300/85"
+          />
+        ) : null}
+
+        {isQueueable ? (
+          <div
+            aria-hidden="true"
+            className="absolute inset-0 z-10 flex items-center justify-center text-foreground opacity-0 transition-all duration-150 group-hover/section:opacity-100 group-focus-visible/section:opacity-100"
+          >
+            <div className="rounded-full bg-black/52 p-1.5 shadow-sm">
+              <HugeiconsIcon icon={Queue02Icon} size={13} />
+            </div>
+          </div>
+        ) : null}
+
+        <div
+          className={cn(
+            "relative z-10 flex h-full min-w-0 flex-col",
+            showRange ? "justify-between" : "justify-center"
+          )}
+        >
           <div className="flex items-center justify-between gap-2">
             <span
               className={cn(
-                "truncate font-semibold tracking-[0.18em] uppercase",
-                compact ? "text-[0.7rem]" : "text-[0.65rem]",
+                "truncate font-medium text-foreground",
+                compact ? "text-[0.68rem]" : "text-[0.72rem]",
               )}
             >
               {section.label}
             </span>
             {!compact ? (
-              <span className="truncate font-mono text-[0.62rem] text-muted-foreground">
+              <span className="truncate font-mono text-[0.62rem] text-foreground/85">
                 {formatMilliseconds(section.startMs)}
               </span>
             ) : null}
           </div>
 
-          <span
-            className={cn(
-              "truncate font-mono text-muted-foreground",
-              compact ? "text-[0.65rem]" : "text-[0.62rem]",
-            )}
-          >
-            {formatMilliseconds(section.startMs)} to{" "}
-            {formatMilliseconds(section.endMs)}
-          </span>
+          {showRange ? (
+            <span
+              className={cn(
+                "truncate font-mono text-foreground/82",
+                compact ? "text-[0.58rem]" : "text-[0.62rem]",
+              )}
+            >
+              {formatMilliseconds(section.startMs)} to{" "}
+              {formatMilliseconds(section.endMs)}
+            </span>
+          ) : null}
         </div>
       </button>
     );
@@ -175,16 +297,22 @@ export function AudioWaveform({
     section: AudioSection,
     {
       className,
+      style,
     }: {
       className?: string;
+      style?: { flexBasis?: string; maxWidth?: string };
     } = {},
   ) {
     const sectionPeaks = getSectionPeaks(section);
 
     return (
       <div
-        className={cn("relative h-[50px] overflow-hidden bg-zinc-900/85", className)}
+        className={cn(
+          "relative h-[64px] min-w-0 flex-1 overflow-hidden bg-background/60 sm:h-[58px] lg:h-[50px]",
+          className
+        )}
         key={section.id}
+        style={style}
       >
         {renderWaveformLines(sectionPeaks, 0.8, "text-foreground/65")}
         {renderSectionOverlay(section)}
@@ -195,7 +323,7 @@ export function AudioWaveform({
   if (viewMode === "grid") {
     if (sections.length === 0) {
       return (
-        <div className="flex min-h-32 items-center justify-center rounded-xl border border-border/70 bg-muted/20 p-6 text-center">
+        <div className="flex min-h-32 items-center justify-center rounded-2xl border border-border/50 bg-muted/15 p-6 text-center">
           <p className="max-w-md text-sm text-muted-foreground">
             {emptyMessage}
           </p>
@@ -204,25 +332,42 @@ export function AudioWaveform({
     }
 
     return (
-      <div className="overflow-x-auto pb-2">
-        <div className="min-w-max overflow-hidden rounded-lg border border-border/70 bg-border/70">
-          <div className="grid auto-rows-[50px] gap-px [grid-template-columns:repeat(4,230px)]">
-            {sections.map((section) => renderStandaloneSection(section))}
-          </div>
+      <div className="overflow-hidden rounded-2xl border border-border/50 bg-border/40">
+        <div className="flex flex-col gap-px" ref={gridContainerRef}>
+          {sectionRows.map((row, rowIndex) => {
+            const sectionWidth =
+              gridColumns === 1
+                ? "100%"
+                : `calc((100% - ${(gridColumns - 1).toString()}px) / ${gridColumns.toString()})`;
+
+            return (
+              <div
+                className="flex gap-px justify-start"
+                key={`row-${rowIndex}`}
+              >
+              {row.map((section) =>
+                renderStandaloneSection(section, {
+                  className: "grow-0 shrink-0",
+                  style: { flexBasis: sectionWidth, maxWidth: sectionWidth },
+                })
+              )}
+              </div>
+            );
+          })}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border/70 bg-zinc-900/85">
-      <div className="relative h-25 w-full">
+    <div className="relative overflow-hidden rounded-2xl border border-border/50 bg-black/60">
+      <div className="relative h-28 w-full">
         {renderWaveformLines(peaks, 0.65, "text-foreground/65")}
 
         {trimWidth > 0 ? (
           <div
             aria-hidden="true"
-            className="absolute inset-y-0 left-0 border-r border-border bg-background/70"
+            className="absolute inset-y-0 left-0 border-r border-border/50 bg-background/55"
             style={{ width: `${trimWidth}%` }}
           />
         ) : null}

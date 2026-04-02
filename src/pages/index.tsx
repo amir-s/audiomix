@@ -1,15 +1,24 @@
-import { ChangeEvent, startTransition, useEffect, useRef, useState } from "react"
+import {
+  startTransition,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react"
 import Head from "next/head"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
-  Cancel01Icon,
+  Delete01Icon,
   LayoutGridIcon,
+  MoreHorizontalIcon,
   PauseIcon,
   PlayIcon,
+  Settings01Icon,
   ViewAgendaIcon,
 } from "@hugeicons/core-free-icons"
 
 import { AudioWaveform, TimelineViewMode } from "@/components/audio-waveform"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -18,8 +27,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import {
   AudioSection,
   createAudioSections,
@@ -36,6 +55,7 @@ import {
   savePersistedAppState,
   saveTimelineFile,
 } from "@/lib/timeline-storage"
+import { cn } from "@/lib/utils"
 
 type BrowserAudioWindow = Window &
   typeof globalThis & {
@@ -188,7 +208,6 @@ function safeStopSource(source: AudioBufferSourceNode | null, when?: number) {
 }
 
 export default function Home() {
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const bpmInputRef = useRef<HTMLInputElement | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
@@ -258,24 +277,6 @@ export default function Home() {
     }
   })
 
-  const timelineMap = new Map(
-    preparedTimelines.map((timeline) => [timeline.id, timeline] as const)
-  )
-
-  const activeTimeline = activeSelection
-    ? (timelineMap.get(activeSelection.timelineId) ?? null)
-    : null
-  const activeSection =
-    activeTimeline?.sections.find(
-      (section) => section.id === activeSelection?.sectionId
-    ) ?? null
-  const pendingTimeline = pendingSelection
-    ? (timelineMap.get(pendingSelection.timelineId) ?? null)
-    : null
-  const pendingSection =
-    pendingTimeline?.sections.find(
-      (section) => section.id === pendingSelection?.sectionId
-    ) ?? null
   const activeSelectionKey = createSelectionKey(activeSelection)
   const pendingSelectionKey = createSelectionKey(pendingSelection)
 
@@ -607,14 +608,59 @@ export default function Home() {
     }
   }
 
+  const handleSpacebarToggle = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.code !== "Space" ||
+      event.repeat ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    ) {
+      return
+    }
+
+    const target = event.target
+    const isWaveformSectionTarget =
+      target instanceof HTMLElement &&
+      target.closest("[data-waveform-section='true']") !== null
+
+    if (
+      target instanceof HTMLElement &&
+      (target.isContentEditable ||
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        (target.tagName === "BUTTON" && !isWaveformSectionTarget))
+    ) {
+      return
+    }
+
+    if (isWaveformSectionTarget) {
+      event.preventDefault()
+    }
+
+    if (!activeSelection) {
+      return
+    }
+
+    event.preventDefault()
+    void togglePlaybackPause()
+  })
+
   async function handleSectionSelect(
     timeline: PreparedTimeline,
-    section: AudioSection
+    section: AudioSection,
+    options?: { instant?: boolean }
   ) {
     const nextSelectionKey = createSelectionKey({
       timelineId: timeline.id,
       sectionId: section.id,
     })
+
+    if (options?.instant) {
+      await startLoopNow(timeline, section)
+      return
+    }
 
     if (nextSelectionKey === pendingSelectionKey) {
       return
@@ -631,22 +677,6 @@ export default function Home() {
     }
 
     await scheduleLoopSwitch(timeline, section)
-  }
-
-  function handleBrowseClick() {
-    fileInputRef.current?.click()
-  }
-
-  async function handleInputFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? [])
-
-    event.target.value = ""
-
-    if (files.length === 0) {
-      return
-    }
-
-    await addFiles(files)
   }
 
   function handleTrimInputChange(timelineId: string, trimInput: string) {
@@ -914,6 +944,18 @@ export default function Home() {
   }, [bpmInput, timelineViewMode, timelines])
 
   useEffect(() => {
+    function handleWindowKeyDown(event: KeyboardEvent) {
+      handleSpacebarToggle(event)
+    }
+
+    window.addEventListener("keydown", handleWindowKeyDown)
+
+    return () => {
+      window.removeEventListener("keydown", handleWindowKeyDown)
+    }
+  }, [])
+
+  useEffect(() => {
     return () => {
       stopPlaybackRef.current()
 
@@ -922,26 +964,9 @@ export default function Home() {
       }
     }
   }, [])
-
-  const transportMessage = (() => {
-    if (pendingTimeline && pendingSection) {
-      return `Queued next: ${pendingTimeline.fileName} · ${
-        pendingSection.label
-      } · ${formatMilliseconds(pendingSection.startMs)} to ${formatMilliseconds(
-        pendingSection.endMs
-      )}.`
-    }
-
-    if (activeTimeline && activeSection) {
-      return `${isPlaybackPaused ? "Paused" : "Looping"} ${
-        activeTimeline.fileName
-      } · ${activeSection.label} · ${formatMilliseconds(
-        activeSection.startMs
-      )} to ${formatMilliseconds(activeSection.endMs)}.`
-    }
-
-    return "Select any section. Clicking a different section queues it at the next loop boundary on the shared output."
-  })()
+  const timelineCountLabel = `${timelines.length} ${
+    timelines.length === 1 ? "track" : "tracks"
+  }`
 
   const viewOptions: Array<{
     label: string
@@ -971,48 +996,120 @@ export default function Home() {
                   Drop audio to add new timelines
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  Release one or more files anywhere on the page. Each file becomes its own timeline.
+                  Release files anywhere on the page.
                 </p>
               </div>
             </div>
           </div>
         ) : null}
 
-        <main className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-          <section className="flex flex-col gap-4">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="flex max-w-3xl flex-col gap-2">
-                <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-                  Audio loop slicer
-                </h1>
-                <p className="text-sm text-muted-foreground sm:text-base">
-                  Drop tracks anywhere on the page, set one BPM for all of them, then
-                  build exact 16-beat loops on separate timelines.
+        <main className="mx-auto flex w-full max-w-5xl flex-col gap-5">
+          <section className="flex flex-col gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-3xl font-semibold tracking-tight sm:text-[2rem]">
+                    Audio loop slicer
+                  </h1>
+                  <Badge variant={timelines.length > 0 ? "secondary" : "outline"}>
+                    {timelineCountLabel}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Drop audio anywhere, set one BPM, and queue exact 16-beat loops.
                 </p>
+              </div>
+
+              <div className="flex items-center gap-2 self-start sm:self-center">
                 <p className="text-sm text-muted-foreground">
                   {timelines.length > 0
-                    ? `${timelines.length} timeline${
-                        timelines.length === 1 ? "" : "s"
-                      } loaded. Drop more audio anywhere or choose more files locally.`
-                    : "No tracks loaded yet. Drop audio files anywhere or choose them locally."}
+                    ? "Drop more audio anywhere to add tracks."
+                    : "Drop audio anywhere to start."}
                 </p>
-              </div>
 
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={handleBrowseClick} type="button">
-                  Choose files
-                </Button>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      aria-label="Open shared loop settings"
+                      size="icon-sm"
+                      title="Shared loop settings"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <HugeiconsIcon icon={Settings01Icon} size={16} />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-64 p-3">
+                    <div className="flex flex-col gap-3">
+                      <p className="text-sm font-semibold tracking-tight">
+                        Shared settings
+                      </p>
+
+                      <FieldGroup className="gap-3">
+                        <Field
+                          className="max-w-xs"
+                          data-invalid={bpmInput !== "" && !bpmIsValid}
+                        >
+                          <FieldLabel htmlFor="bpm-input">BPM</FieldLabel>
+                          <Input
+                            aria-invalid={bpmInput !== "" && !bpmIsValid}
+                            id="bpm-input"
+                            inputMode="decimal"
+                            onChange={(event) => {
+                              stopPlaybackRef.current()
+                              setBpmInput(event.target.value)
+                            }}
+                            placeholder="128"
+                            ref={bpmInputRef}
+                            step="0.01"
+                            type="number"
+                            value={bpmInput}
+                          />
+                          <FieldDescription>
+                            {loopDurationSec
+                              ? `${formatDuration(loopDurationSec)} per loop`
+                              : "Enter a positive BPM"}
+                          </FieldDescription>
+                        </Field>
+
+                        <Field>
+                          <FieldLabel>View</FieldLabel>
+                          <div className="flex items-center gap-1 rounded-lg bg-muted/30 p-1">
+                            {viewOptions.map((option) => (
+                              <Button
+                                aria-label={option.label}
+                                className="flex-1"
+                                key={option.value}
+                                onClick={() => setTimelineViewMode(option.value)}
+                                size="sm"
+                                title={option.label}
+                                type="button"
+                                variant={
+                                  timelineViewMode === option.value
+                                    ? "secondary"
+                                    : "ghost"
+                                }
+                              >
+                                <HugeiconsIcon
+                                  data-icon="inline-start"
+                                  icon={option.icon}
+                                  size={14}
+                                />
+                                <span>
+                                  {option.label === "Compact timeline"
+                                    ? "Timeline"
+                                    : option.label}
+                                </span>
+                              </Button>
+                            ))}
+                          </div>
+                        </Field>
+                      </FieldGroup>
+                    </div>
+                  </PopoverContent>
+                </Popover>
               </div>
             </div>
-
-            <input
-              accept="audio/*"
-              className="sr-only"
-              onChange={handleInputFileChange}
-              multiple
-              ref={fileInputRef}
-              type="file"
-            />
 
             {errorMessage ? (
               <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -1021,207 +1118,209 @@ export default function Home() {
             ) : null}
           </section>
 
-          <Card className="min-w-0">
-            <CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="flex flex-col gap-1.5">
-                <CardTitle>Shared loop settings</CardTitle>
-                <CardDescription>
-                  BPM applies to every timeline. Any section from any song can be queued next on the shared output.
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-1 self-start rounded-lg border border-border/70 bg-muted/20 p-1">
-                {viewOptions.map((option) => (
-                  <Button
-                    aria-label={option.label}
-                    key={option.value}
-                    onClick={() => setTimelineViewMode(option.value)}
-                    size="icon-sm"
-                    title={option.label}
-                    type="button"
-                    variant={
-                      timelineViewMode === option.value ? "secondary" : "ghost"
-                    }
-                  >
-                    <HugeiconsIcon icon={option.icon} size={16} />
-                  </Button>
-                ))}
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 md:grid-cols-[minmax(0,220px)_minmax(0,1fr)] md:items-end">
-                <Field data-invalid={bpmInput !== "" && !bpmIsValid} className="max-w-xs">
-                  <FieldLabel htmlFor="bpm-input">BPM</FieldLabel>
-                  <Input
-                    aria-invalid={bpmInput !== "" && !bpmIsValid}
-                    id="bpm-input"
-                    inputMode="decimal"
-                    onChange={(event) => {
-                      stopPlaybackRef.current()
-                      setBpmInput(event.target.value)
-                    }}
-                    placeholder="128"
-                    ref={bpmInputRef}
-                    step="0.01"
-                    type="number"
-                    value={bpmInput}
-                  />
-                  <FieldDescription>
-                    {loopDurationSec
-                      ? `Each loop is ${formatDuration(loopDurationSec)} long.`
-                      : "Enter a positive BPM to generate 16-beat sections."}
-                  </FieldDescription>
-                </Field>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <Button
-                    aria-label={isPlaybackPaused ? "Resume loop" : "Pause loop"}
-                    disabled={!activeSection}
-                    onClick={togglePlaybackPause}
-                    size="icon-lg"
-                    title={isPlaybackPaused ? "Resume loop" : "Pause loop"}
-                    type="button"
-                    variant="outline"
-                  >
-                    <HugeiconsIcon
-                      icon={isPlaybackPaused ? PlayIcon : PauseIcon}
-                      size={18}
-                    />
-                  </Button>
-                  <p className="max-w-2xl text-sm text-muted-foreground">
-                    {transportMessage}
-                  </p>
-                </div>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                {loopDurationSec
-                  ? `All timelines currently slice into ${formatDuration(
-                      loopDurationSec
-                    )} sections. Tail audio shorter than one full section is hidden.`
-                  : "Set BPM once, then adjust each timeline start time independently."}
-              </p>
-            </CardContent>
-          </Card>
-
           {preparedTimelines.length === 0 ? (
             <Card className="min-w-0">
               <CardContent className="min-h-48 items-center justify-center py-10 text-center">
                 <p className="max-w-lg text-sm text-muted-foreground">
-                  Drop one or more audio files anywhere on the page to create separate
-                  timelines. Files and per-timeline start times will be restored after a
-                  refresh when the browser can persist them locally.
+                  Drop audio files anywhere to add tracks. Track files and start
+                  offsets are restored locally after refresh when the browser allows it.
                 </p>
               </CardContent>
             </Card>
           ) : (
-            preparedTimelines.map((timeline) => (
-              <Card className="min-w-0" key={timeline.id}>
-                <CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0 flex-1">
-                    <CardTitle className="truncate">{timeline.fileName}</CardTitle>
-                    <CardDescription>
-                      {timeline.isDecoding
-                        ? "Decoding audio and building waveform peaks..."
-                        : timeline.audioBuffer
-                          ? `${formatDuration(timeline.audioBuffer.duration)} · ${
-                              timeline.sections.length
-                            } playable section${
-                              timeline.sections.length === 1 ? "" : "s"
-                            }.`
-                          : "This file is waiting for audio data."}
-                    </CardDescription>
-                  </div>
-                  <Button
-                    aria-label={`Remove ${timeline.fileName}`}
-                    onClick={() => {
-                      void handleTimelineRemove(timeline.id)
-                    }}
-                    size="icon-sm"
-                    title={`Remove ${timeline.fileName}`}
-                    type="button"
-                    variant="ghost"
-                  >
-                    <HugeiconsIcon icon={Cancel01Icon} size={14} />
-                  </Button>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid gap-4 md:grid-cols-[minmax(0,220px)_minmax(0,1fr)] md:items-end">
-                    <Field
-                      className="max-w-xs"
-                      data-invalid={timeline.trimInput !== "" && !timeline.trimHasValidRange}
-                    >
-                      <FieldLabel htmlFor={`trim-input-${timeline.id}`}>
-                        Start time (ms)
-                      </FieldLabel>
-                      <Input
-                        aria-invalid={timeline.trimInput !== "" && !timeline.trimHasValidRange}
-                        id={`trim-input-${timeline.id}`}
-                        inputMode="numeric"
-                        min="0"
-                        onChange={(event) => {
-                          handleTrimInputChange(timeline.id, event.target.value)
-                        }}
-                        placeholder="0"
-                        step="1"
-                        type="number"
-                        value={timeline.trimInput}
-                      />
-                      <FieldDescription>
-                        {timeline.audioBuffer && timeline.trimIsValid
-                          ? `First section starts at ${formatMilliseconds(
-                              timeline.trimValue
-                            )}.`
-                          : "Offset the first generated section from this file's start."}
-                      </FieldDescription>
-                    </Field>
+            preparedTimelines.map((timeline) => {
+              const isTimelineActive = activeSelection?.timelineId === timeline.id
+              const timelineSummary = timeline.isDecoding
+                ? "Building waveform..."
+                : timeline.audioBuffer
+                  ? `${formatDuration(timeline.audioBuffer.duration)} · ${
+                      timeline.sections.length
+                    } section${timeline.sections.length === 1 ? "" : "s"}`
+                  : "Waiting for audio"
 
-                    <p className="max-w-2xl text-xs text-muted-foreground">
-                      {timeline.sections.length > 0
-                        ? `${timeline.sections.length} section${
-                            timeline.sections.length === 1 ? "" : "s"
-                          } can be queued from this timeline.`
-                        : "This timeline will populate once the shared BPM and local start time produce full 16-beat sections."}
-                    </p>
-                  </div>
+              return (
+                <Card
+                  className={cn(
+                    "min-w-0",
+                    isTimelineActive && "border-primary/20 bg-card/90"
+                  )}
+                  key={timeline.id}
+                >
+                  <CardHeader className="gap-2 px-4 py-4 sm:px-5 sm:py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <CardTitle className="min-w-0 truncate">
+                          {timeline.fileName}
+                        </CardTitle>
+                        <CardDescription className="mt-1 truncate">
+                          {timelineSummary}
+                        </CardDescription>
+                      </div>
 
-                  {timeline.errorMessage ? (
-                    <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                      {timeline.errorMessage}
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            aria-label={`Open settings for ${timeline.fileName}`}
+                            size="icon-sm"
+                            title={`Settings for ${timeline.fileName}`}
+                            type="button"
+                            variant="ghost"
+                          >
+                            <HugeiconsIcon icon={MoreHorizontalIcon} size={16} />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent align="end" className="w-60 p-3">
+                          <div className="flex flex-col gap-3">
+                            <p className="truncate text-sm font-semibold tracking-tight">
+                              {timeline.fileName}
+                            </p>
+
+                            <FieldGroup className="gap-2.5">
+                              <Field
+                                className="max-w-xs"
+                                data-invalid={
+                                  timeline.trimInput !== "" &&
+                                  !timeline.trimHasValidRange
+                                }
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <FieldLabel htmlFor={`trim-input-${timeline.id}`}>
+                                    Start
+                                  </FieldLabel>
+                                  <span className="text-xs text-muted-foreground">
+                                    ms
+                                  </span>
+                                </div>
+                                <Input
+                                  aria-invalid={
+                                    timeline.trimInput !== "" &&
+                                    !timeline.trimHasValidRange
+                                  }
+                                  className="h-8"
+                                  id={`trim-input-${timeline.id}`}
+                                  inputMode="numeric"
+                                  min="0"
+                                  onChange={(event) => {
+                                    handleTrimInputChange(
+                                      timeline.id,
+                                      event.target.value
+                                    )
+                                  }}
+                                  placeholder="0"
+                                  step="1"
+                                  type="number"
+                                  value={timeline.trimInput}
+                                />
+                                <FieldDescription>
+                                  {timeline.trimInput !== "" &&
+                                  !timeline.trimHasValidRange
+                                    ? "Choose a start inside the track."
+                                    : `Starts at ${formatMilliseconds(
+                                        timeline.trimIsValid
+                                          ? timeline.trimValue
+                                          : 0
+                                      )}.`}
+                                </FieldDescription>
+                              </Field>
+                            </FieldGroup>
+
+                            <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
+                              <p className="text-xs text-muted-foreground">
+                                Remove track
+                              </p>
+                              <Button
+                                aria-label={`Remove ${timeline.fileName}`}
+                                onClick={() => {
+                                  void handleTimelineRemove(timeline.id)
+                                }}
+                                size="xs"
+                                title={`Remove ${timeline.fileName}`}
+                                type="button"
+                                variant="destructive"
+                              >
+                                <HugeiconsIcon
+                                  data-icon="inline-start"
+                                  icon={Delete01Icon}
+                                  size={14}
+                                />
+                                <span>Remove</span>
+                              </Button>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
                     </div>
-                  ) : null}
+                  </CardHeader>
+                  <CardContent className="gap-3 px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
+                    {timeline.errorMessage ? (
+                      <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                        {timeline.errorMessage}
+                      </div>
+                    ) : null}
 
-                  <AudioWaveform
-                    activeSectionId={
-                      activeSelection?.timelineId === timeline.id
-                        ? activeSelection.sectionId
-                        : null
-                    }
-                    activeSectionProgress={
-                      activeSelection?.timelineId === timeline.id
-                        ? activeSectionProgress
-                        : 0
-                    }
-                    disabled={timeline.isDecoding || !timeline.audioBuffer}
-                    durationSec={timeline.durationSec}
-                    emptyMessage={timeline.message}
-                    onSectionSelect={(section) => {
-                      void handleSectionSelect(timeline, section)
-                    }}
-                    peaks={timeline.waveformPeaks}
-                    pendingSectionId={
-                      pendingSelection?.timelineId === timeline.id
-                        ? pendingSelection.sectionId
-                        : null
-                    }
-                    sections={timeline.sections}
-                    trimSec={timeline.trimIsValid ? timeline.trimValue / 1000 : null}
-                    viewMode={timelineViewMode}
-                  />
-                </CardContent>
-              </Card>
-            ))
+                    <AudioWaveform
+                      activeSectionId={
+                        activeSelection?.timelineId === timeline.id
+                          ? activeSelection.sectionId
+                          : null
+                      }
+                      activeSectionProgress={
+                        activeSelection?.timelineId === timeline.id
+                          ? activeSectionProgress
+                          : 0
+                      }
+                      disabled={timeline.isDecoding || !timeline.audioBuffer}
+                      durationSec={timeline.durationSec}
+                      emptyMessage={timeline.message}
+                      onSectionSelect={(section, options) => {
+                        void handleSectionSelect(timeline, section, options)
+                      }}
+                      peaks={timeline.waveformPeaks}
+                      pendingSectionId={
+                        pendingSelection?.timelineId === timeline.id
+                          ? pendingSelection.sectionId
+                          : null
+                      }
+                      sections={timeline.sections}
+                      trimSec={timeline.trimIsValid ? timeline.trimValue / 1000 : null}
+                      viewMode={timelineViewMode}
+                    />
+                  </CardContent>
+                </Card>
+              )
+            })
           )}
         </main>
+
+        <Button
+          aria-label={
+            !activeSelection
+              ? "Select a loop to play"
+              : isPlaybackPaused
+                ? "Resume loop (Space)"
+                : "Pause loop (Space)"
+          }
+          className="fixed right-6 bottom-6 z-40 size-14 rounded-full shadow-lg sm:right-8 sm:bottom-8"
+          disabled={!activeSelection}
+          onClick={() => {
+            void togglePlaybackPause()
+          }}
+          size="icon-lg"
+          title={
+            !activeSelection
+              ? "Select a loop to play"
+              : isPlaybackPaused
+                ? "Resume loop (Space)"
+                : "Pause loop (Space)"
+          }
+          type="button"
+          variant={activeSelection ? "default" : "outline"}
+        >
+          <HugeiconsIcon
+            icon={activeSelection && !isPlaybackPaused ? PauseIcon : PlayIcon}
+            size={20}
+          />
+        </Button>
       </div>
     </>
   )
