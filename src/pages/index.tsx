@@ -936,19 +936,20 @@ export default function Home() {
     const isWaveformSectionTarget =
       target instanceof HTMLElement &&
       target.closest("[data-waveform-section='true']") !== null
+    const isButtonTarget =
+      target instanceof HTMLElement && target.closest("button") !== null
 
     if (
       target instanceof HTMLElement &&
       (target.isContentEditable ||
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT" ||
-        (target.tagName === "BUTTON" && !isWaveformSectionTarget))
+        target.tagName === "SELECT")
     ) {
       return
     }
 
-    if (isWaveformSectionTarget) {
+    if (isWaveformSectionTarget || isButtonTarget) {
       event.preventDefault()
     }
 
@@ -1141,6 +1142,24 @@ export default function Home() {
     }
   }
 
+  async function handleCodeStateButtonPress(
+    timeline: PreparedTimeline,
+    stateName: string,
+    options?: { force?: boolean }
+  ) {
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      selectedCodeState: stateName,
+    }))
+
+    if (options?.force) {
+      await handlePlayCodeState(timeline, stateName)
+      return
+    }
+
+    await handleGoToState(timeline, stateName)
+  }
+
   function handleSelectedTimelineChange(nextTimelineId: string) {
     if (nextTimelineId === selectedTimelineId) {
       return
@@ -1177,13 +1196,6 @@ export default function Home() {
         timeline.id === timelineId ? { ...timeline, dslInput } : timeline
       )
     )
-  }
-
-  function handleCodeStateSelection(timelineId: string, stateName: string) {
-    updateTimeline(timelineId, (timeline) => ({
-      ...timeline,
-      selectedCodeState: stateName,
-    }))
   }
 
   async function handleTimelineRemove(timelineId: string) {
@@ -1510,20 +1522,21 @@ export default function Home() {
     { label: "Grid", value: "grid", icon: LayoutGridIcon },
   ]
 
-  const runtimeCurrentSectionLabel =
-    activeSelection && selectedTimeline && activeSelection.timelineId === selectedTimeline.id
-      ? selectedTimeline.sections.find(
-          (section) => section.id === activeSelection.sectionId
-        )?.label ?? "—"
-      : "—"
-  const runtimeQueuedSectionLabel =
-    pendingSelection &&
+  const selectedTimelineStateOptions = selectedTimeline
+    ? getStateOptions(selectedTimeline)
+    : []
+  const selectedTimelineActiveCodeState =
     selectedTimeline &&
-    pendingSelection.timelineId === selectedTimeline.id
-      ? selectedTimeline.sections.find(
-          (section) => section.id === pendingSelection.sectionId
-        )?.label ?? "—"
-      : "—"
+    playbackMode === "code" &&
+    activeSelection?.timelineId === selectedTimeline.id
+      ? (codeRuntimeStatus?.currentStateName ?? null)
+      : null
+  const selectedTimelinePendingCodeState =
+    selectedTimeline &&
+    playbackMode === "code" &&
+    activeSelection?.timelineId === selectedTimeline.id
+      ? (codeRuntimeStatus?.pendingTargetStateName ?? null)
+      : null
 
   return (
     <>
@@ -1844,55 +1857,6 @@ export default function Home() {
                     viewMode={timelineViewMode}
                   />
 
-                  <div className="grid gap-2 rounded-xl border border-border/50 bg-muted/15 p-3 text-xs sm:grid-cols-2 lg:grid-cols-5">
-                    <div className="flex flex-col gap-1">
-                      <span className="text-muted-foreground">Mode</span>
-                      <span className="font-medium">
-                        {activeSelection?.timelineId === selectedTimeline.id
-                          ? playbackMode === "code"
-                            ? "Code"
-                            : "Manual"
-                          : "Idle"}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-muted-foreground">Current state</span>
-                      <span className="font-medium">
-                        {playbackMode === "code" &&
-                        activeSelection?.timelineId === selectedTimeline.id
-                          ? (codeRuntimeStatus?.currentStateName ?? "—")
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-muted-foreground">Queued state</span>
-                      <span className="font-medium">
-                        {playbackMode === "code" &&
-                        activeSelection?.timelineId === selectedTimeline.id
-                          ? (codeRuntimeStatus?.nextStateName ?? "—")
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-muted-foreground">Current section</span>
-                      <span className="font-medium">{runtimeCurrentSectionLabel}</span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-muted-foreground">Queued section</span>
-                      <span className="font-medium">{runtimeQueuedSectionLabel}</span>
-                    </div>
-                    {playbackMode === "code" &&
-                    activeSelection?.timelineId === selectedTimeline.id &&
-                    codeRuntimeStatus?.pendingTargetStateName ? (
-                      <div className="flex flex-col gap-1 sm:col-span-2 lg:col-span-5">
-                        <span className="text-muted-foreground">Buffered goTo</span>
-                        <span className="font-medium">
-                          {codeRuntimeStatus.pendingTargetStateName}
-                        </span>
-                      </div>
-                    ) : null}
-                  </div>
-
                   <FieldGroup className="gap-3">
                     <Field>
                       <div className="flex items-center justify-between gap-2">
@@ -1948,79 +1912,57 @@ export default function Home() {
                       >
                         Run
                       </Button>
-
-                      <div className="min-w-44 flex-1 sm:flex-none">
-                        <Select
-                          onValueChange={(value) => {
-                            handleCodeStateSelection(selectedTimeline.id, value)
-                          }}
-                          value={
-                            selectedTimeline.selectedCodeState ??
-                            getStateOptions(selectedTimeline)[0] ??
-                            ""
-                          }
-                        >
-                          <SelectTrigger
-                            aria-label="Select code state"
-                            className="w-full"
-                            disabled={getStateOptions(selectedTimeline).length === 0}
-                          >
-                            <SelectValue placeholder="Select state" />
-                          </SelectTrigger>
-                          <SelectContent align="start">
-                            <SelectGroup>
-                              {getStateOptions(selectedTimeline).map((stateName) => (
-                                <SelectItem key={stateName} value={stateName}>
-                                  {stateName}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <Button
-                        disabled={
-                          !selectedTimeline.compiledProgram ||
-                          selectedTimeline.codeIsDirty ||
-                          !selectedTimeline.selectedCodeState
-                        }
-                        onClick={() => {
-                          if (selectedTimeline.selectedCodeState) {
-                            void handlePlayCodeState(
-                              selectedTimeline,
-                              selectedTimeline.selectedCodeState
-                            )
-                          }
-                        }}
-                        type="button"
-                        variant="secondary"
-                      >
-                        Play state
-                      </Button>
-
-                      <Button
-                        disabled={
-                          !selectedTimeline.compiledProgram ||
-                          selectedTimeline.codeIsDirty ||
-                          !selectedTimeline.selectedCodeState ||
-                          playbackMode !== "code" ||
-                          activeSelection?.timelineId !== selectedTimeline.id
-                        }
-                        onClick={() => {
-                          if (selectedTimeline.selectedCodeState) {
-                            void handleGoToState(
-                              selectedTimeline,
-                              selectedTimeline.selectedCodeState
-                            )
-                          }
-                        }}
-                        type="button"
-                        variant="outline"
-                      >
-                        Go to state
-                      </Button>
                     </div>
+
+                    {selectedTimelineStateOptions.length > 0 ? (
+                      <div className="flex flex-col gap-2">
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                          {selectedTimelineStateOptions.map((stateName) => {
+                            const isCurrentState =
+                              selectedTimelineActiveCodeState === stateName
+                            const isPendingState =
+                              selectedTimelinePendingCodeState === stateName
+                            const isSelectedState =
+                              selectedTimeline.selectedCodeState === stateName
+
+                            return (
+                              <Button
+                                aria-pressed={isSelectedState}
+                                className="h-auto min-h-12 justify-start px-3 py-2 text-left whitespace-normal"
+                                key={stateName}
+                                onClick={(event) => {
+                                  void handleCodeStateButtonPress(
+                                    selectedTimeline,
+                                    stateName,
+                                    {
+                                      force: event.metaKey || event.ctrlKey,
+                                    }
+                                  )
+                                }}
+                                title="Click to queue goTo. Cmd/Ctrl+Click force-starts this state."
+                                type="button"
+                                variant={
+                                  isCurrentState
+                                    ? "default"
+                                    : isPendingState
+                                      ? "secondary"
+                                      : isSelectedState
+                                        ? "outline"
+                                        : "ghost"
+                                }
+                              >
+                                {stateName}
+                              </Button>
+                            )
+                          })}
+                        </div>
+                        <FieldDescription>
+                          Click a state to queue `goTo` while this timeline is
+                          playing in code mode. Use Cmd/Ctrl+Click to force-play a
+                          state immediately.
+                        </FieldDescription>
+                      </div>
+                    ) : null}
 
                     {selectedTimeline.lastRunDiagnostics.length > 0 ? (
                       <div className="flex flex-col gap-2 rounded-xl border border-border/50 bg-muted/15 p-3">
