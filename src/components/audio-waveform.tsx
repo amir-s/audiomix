@@ -183,7 +183,6 @@ export function AudioWaveform({
     const clampedProgress = Math.max(0, Math.min(1, progress));
     const progressWidth = `${clampedProgress * 100}%`;
     const progressMarkerLeft = `calc(${progressWidth} - 1px)`;
-    const showRange = !compact || isActive || isPending;
 
     function handleClick(event: MouseEvent<HTMLButtonElement>) {
       onSectionSelect(section, { instant: event.metaKey });
@@ -258,10 +257,10 @@ export function AudioWaveform({
         <div
           className={cn(
             "relative z-10 flex h-full min-w-0 flex-col",
-            showRange ? "justify-between" : "justify-center"
+            compact ? "justify-center" : "justify-between"
           )}
         >
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
             <span
               className={cn(
                 "truncate font-medium text-foreground",
@@ -270,23 +269,14 @@ export function AudioWaveform({
             >
               {section.label}
             </span>
-            {!compact ? (
+          </div>
+
+          {!compact ? (
+            <div className="flex justify-end">
               <span className="truncate font-mono text-[0.62rem] text-foreground/85">
                 {formatMilliseconds(section.startMs)}
               </span>
-            ) : null}
-          </div>
-
-          {showRange ? (
-            <span
-              className={cn(
-                "truncate font-mono text-foreground/82",
-                compact ? "text-[0.58rem]" : "text-[0.62rem]",
-              )}
-            >
-              {formatMilliseconds(section.startMs)} to{" "}
-              {formatMilliseconds(section.endMs)}
-            </span>
+            </div>
           ) : null}
         </div>
       </button>
