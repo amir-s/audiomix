@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 import { AudioSection, formatMilliseconds } from "@/lib/audio";
 
-export type TimelineViewMode = "compact-timeline" | "timeline" | "grid";
+export type TimelineViewMode = "compact-timeline" | "grid";
 
 type AudioWaveformProps = {
   peaks: number[];
@@ -95,17 +95,18 @@ export function AudioWaveform({
     );
   }
 
-  function renderStripSection(
+  function renderSectionOverlay(
     section: AudioSection,
     {
       className,
-      heightClassName,
+      style,
+      compact = false,
     }: {
       className?: string;
-      heightClassName?: string;
+      style?: { left?: string; width?: string };
+      compact?: boolean;
     } = {},
   ) {
-    const sectionPeaks = getSectionPeaks(section);
     const isActive = section.id === activeSectionId;
     const isPending = section.id === pendingSectionId;
     const progress = isActive ? activeSectionProgress : 0;
@@ -116,54 +117,82 @@ export function AudioWaveform({
         key={section.id}
         aria-pressed={isActive}
         className={cn(
-          "relative overflow-hidden bg-muted/20 text-left outline-none transition-colors focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring/40",
-          heightClassName ?? "h-14",
+          "absolute overflow-hidden text-left outline-none transition-colors focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring/40",
+          compact ? "inset-y-0 border-r border-border/80 px-2 py-3" : "inset-0 px-2 py-1.5",
           className,
           isActive &&
-            "z-10 bg-emerald-950/10 text-foreground ring-2 ring-inset ring-emerald-900/90",
+            "z-10 bg-emerald-950/12 text-foreground ring-2 ring-inset ring-emerald-900/90",
           !isActive &&
             isPending &&
-            "z-10 bg-red-950/10 text-foreground ring-2 ring-inset ring-red-900/90",
-          !isActive && !isPending && "hover:bg-accent/50",
+            "z-10 bg-red-950/12 text-foreground ring-2 ring-inset ring-red-900/90",
+          !isActive && !isPending && "bg-background/10 hover:bg-accent/50",
         )}
         disabled={disabled}
         onClick={() => onSectionSelect(section)}
+        style={style}
         type="button"
       >
         {progress > 0 ? (
           <div
             aria-hidden="true"
-            className="absolute inset-y-0 left-0 bg-emerald-950/14"
+            className="absolute inset-y-0 left-0 bg-emerald-950/16"
             style={{ width: progressWidth }}
           />
         ) : null}
 
-        {renderWaveformLines(sectionPeaks, 0.85, "text-foreground/45")}
-
-        <div className="relative z-10 flex h-full min-w-0 flex-col justify-between p-2">
+        <div className="relative z-10 flex h-full min-w-0 flex-col justify-between">
           <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-[0.65rem] font-semibold tracking-[0.18em] uppercase">
+            <span
+              className={cn(
+                "truncate font-semibold tracking-[0.18em] uppercase",
+                compact ? "text-[0.7rem]" : "text-[0.65rem]",
+              )}
+            >
               {section.label}
             </span>
-            <span className="truncate font-mono text-[0.62rem] text-muted-foreground">
-              {formatMilliseconds(section.startMs)}
-            </span>
+            {!compact ? (
+              <span className="truncate font-mono text-[0.62rem] text-muted-foreground">
+                {formatMilliseconds(section.startMs)}
+              </span>
+            ) : null}
           </div>
 
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-[0.62rem] text-muted-foreground">
-              {formatMilliseconds(section.startMs)}
-            </span>
-            <span className="truncate font-mono text-[0.62rem] text-muted-foreground">
-              {formatMilliseconds(section.endMs)}
-            </span>
-          </div>
+          <span
+            className={cn(
+              "truncate font-mono text-muted-foreground",
+              compact ? "text-[0.65rem]" : "text-[0.62rem]",
+            )}
+          >
+            {formatMilliseconds(section.startMs)} to{" "}
+            {formatMilliseconds(section.endMs)}
+          </span>
         </div>
       </button>
     );
   }
 
-  if (viewMode === "timeline" || viewMode === "grid") {
+  function renderStandaloneSection(
+    section: AudioSection,
+    {
+      className,
+    }: {
+      className?: string;
+    } = {},
+  ) {
+    const sectionPeaks = getSectionPeaks(section);
+
+    return (
+      <div
+        className={cn("relative h-[50px] overflow-hidden bg-zinc-900/85", className)}
+        key={section.id}
+      >
+        {renderWaveformLines(sectionPeaks, 0.8, "text-foreground/65")}
+        {renderSectionOverlay(section)}
+      </div>
+    );
+  }
+
+  if (viewMode === "grid") {
     if (sections.length === 0) {
       return (
         <div className="flex min-h-32 items-center justify-center rounded-xl border border-border/70 bg-muted/20 p-6 text-center">
@@ -174,23 +203,11 @@ export function AudioWaveform({
       );
     }
 
-    return viewMode === "timeline" ? (
+    return (
       <div className="overflow-x-auto pb-2">
         <div className="min-w-max overflow-hidden rounded-lg border border-border/70 bg-border/70">
-          <div className="flex gap-px">
-            {sections.map((section) =>
-              renderStripSection(section, {
-                className: "w-[230px] shrink-0",
-              }),
-            )}
-          </div>
-        </div>
-      </div>
-    ) : (
-      <div className="overflow-x-auto pb-2">
-        <div className="min-w-max overflow-hidden rounded-lg border border-border/70 bg-border/70">
-          <div className="grid auto-rows-[56px] gap-px [grid-template-columns:repeat(4,230px)]">
-            {sections.map((section) => renderStripSection(section))}
+          <div className="grid auto-rows-[50px] gap-px [grid-template-columns:repeat(4,230px)]">
+            {sections.map((section) => renderStandaloneSection(section))}
           </div>
         </div>
       </div>
@@ -198,9 +215,9 @@ export function AudioWaveform({
   }
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+    <div className="relative overflow-hidden rounded-xl border border-border/70 bg-zinc-900/85">
       <div className="relative h-25 w-full">
-        {renderWaveformLines(peaks, 0.65)}
+        {renderWaveformLines(peaks, 0.65, "text-foreground/65")}
 
         {trimWidth > 0 ? (
           <div
@@ -214,50 +231,10 @@ export function AudioWaveform({
           const left = (section.startSec / normalizedDuration) * 100;
           const width =
             ((section.endSec - section.startSec) / normalizedDuration) * 100;
-          const isActive = section.id === activeSectionId;
-          const isPending = section.id === pendingSectionId;
-          const progress = isActive ? activeSectionProgress : 0;
-          const progressWidth = `${Math.max(0, Math.min(1, progress)) * 100}%`;
-
-          return (
-            <button
-              key={section.id}
-              aria-pressed={isActive}
-              className={cn(
-                "absolute inset-y-0 overflow-hidden border-r border-border/80 px-2 py-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-                isActive &&
-                  "z-10 bg-emerald-950/12 text-foreground ring-2 ring-inset ring-emerald-900/90",
-                !isActive &&
-                  isPending &&
-                  "z-10 bg-red-950/12 text-foreground ring-2 ring-inset ring-red-900/90",
-                !isActive &&
-                  !isPending &&
-                  "bg-background/10 hover:bg-accent/50",
-              )}
-              disabled={disabled}
-              onClick={() => onSectionSelect(section)}
-              style={{ left: `${left}%`, width: `${width}%` }}
-              type="button"
-            >
-              {progress > 0 ? (
-                <div
-                  aria-hidden="true"
-                  className="absolute inset-y-0 left-0 bg-emerald-950/16"
-                  style={{ width: progressWidth }}
-                />
-              ) : null}
-
-              <span className="relative z-10 flex h-full min-w-0 flex-col justify-between">
-                <span className="truncate text-[0.7rem] font-semibold tracking-[0.18em] uppercase">
-                  {section.label}
-                </span>
-                <span className="truncate font-mono text-[0.65rem] text-muted-foreground">
-                  {formatMilliseconds(section.startMs)} to{" "}
-                  {formatMilliseconds(section.endMs)}
-                </span>
-              </span>
-            </button>
-          );
+          return renderSectionOverlay(section, {
+            compact: true,
+            style: { left: `${left}%`, width: `${width}%` },
+          });
         })}
 
         {sections.length === 0 ? (

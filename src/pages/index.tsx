@@ -5,7 +5,6 @@ import {
   LayoutGridIcon,
   PauseIcon,
   PlayIcon,
-  TimelineIcon,
   ViewAgendaIcon,
 } from "@hugeicons/core-free-icons"
 
@@ -551,7 +550,6 @@ export default function Home() {
     icon: typeof ViewAgendaIcon
   }> = [
     { label: "Compact timeline", value: "compact-timeline", icon: ViewAgendaIcon },
-    { label: "Timeline", value: "timeline", icon: TimelineIcon },
     { label: "Grid", value: "grid", icon: LayoutGridIcon },
   ]
 
