@@ -9,6 +9,7 @@ export type PersistedTimelineMetadata = {
   fileType: string;
   fileLastModified: number;
   trimInput: string;
+  dslInput: string;
 };
 
 export type PersistedAppState = {
@@ -36,7 +37,9 @@ function isPersistedTimelineMetadata(
     typeof candidate.fileName === "string" &&
     typeof candidate.fileType === "string" &&
     typeof candidate.fileLastModified === "number" &&
-    typeof candidate.trimInput === "string"
+    typeof candidate.trimInput === "string" &&
+    (typeof candidate.dslInput === "string" ||
+      typeof candidate.dslInput === "undefined")
   );
 }
 
@@ -88,7 +91,12 @@ export function loadPersistedAppState() {
           ? parsedState.timelineViewMode
           : "compact-timeline",
       timelines: Array.isArray(parsedState.timelines)
-        ? parsedState.timelines.filter(isPersistedTimelineMetadata)
+        ? parsedState.timelines
+            .filter(isPersistedTimelineMetadata)
+            .map((timeline) => ({
+              ...timeline,
+              dslInput: timeline.dslInput ?? "",
+            }))
         : [],
     } satisfies PersistedAppState;
   } catch {

@@ -20,10 +20,7 @@ import {
 import { AudioWaveform, TimelineViewMode } from "@/components/audio-waveform"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   Field,
   FieldDescription,
@@ -44,6 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
 import {
   AudioSection,
   createAudioSections,
@@ -52,6 +50,14 @@ import {
   formatMilliseconds,
   getSectionDurationSec,
 } from "@/lib/audio"
+import {
+  compileMusicDsl,
+  createNavigator,
+  type CompiledMusicProgram,
+  type MusicDslDiagnostic,
+  type Navigator,
+  type NavigatorStatus,
+} from "@/lib/music-dsl"
 import {
   deleteTimelineFile,
   loadPersistedAppState,
@@ -67,16 +73,34 @@ type BrowserAudioWindow = Window &
     webkitAudioContext?: typeof AudioContext
   }
 
+type PlaybackMode = "idle" | "manual" | "code"
+
 type TimelineState = PersistedTimelineMetadata & {
   audioBuffer: AudioBuffer | null
   waveformPeaks: number[]
   isDecoding: boolean
   errorMessage: string | null
+  compiledProgram: CompiledMusicProgram | null
+  lastCompiledDslInput: string | null
+  lastCompiledSectionCount: number | null
+  lastRunDiagnostics: MusicDslDiagnostic[]
+  selectedCodeState: string | null
+  lastActiveCodeState: string | null
 }
 
 type TimelineSelection = {
   timelineId: string
   sectionId: string
+}
+
+type PlaybackTarget = {
+  timelineId: string
+  section: AudioSection
+  stateName: string | null
+}
+
+type ScheduledPlaybackItem = PlaybackTarget & {
+  startTime: number
 }
 
 type HydrateTimelineFromBlob = (
@@ -93,6 +117,7 @@ type PreparedTimeline = TimelineState & {
   durationSec: number
   sections: AudioSection[]
   message: string
+  codeIsDirty: boolean
 }
 
 function getTimelineSummary(timeline: PreparedTimeline) {
@@ -141,6 +166,12 @@ function createTimelinePlaceholder(
     waveformPeaks: [],
     isDecoding: true,
     errorMessage: null,
+    compiledProgram: null,
+    lastCompiledDslInput: null,
+    lastCompiledSectionCount: null,
+    lastRunDiagnostics: [],
+    selectedCodeState: null,
+    lastActiveCodeState: null,
   }
 }
 
@@ -185,19 +216,15 @@ function getTimelineWaveformMessage({
     return "No full 16-beat sections fit after the selected start time."
   }
 
-  return "Click a section to loop it. Clicking a different section queues a switch at the next loop boundary."
+  return "Click a section to play it manually. In code mode, the current and queued sections follow the DSL."
 }
 
-function createLoopSource(
+function createSectionSource(
   audioContext: AudioContext,
-  audioBuffer: AudioBuffer,
-  section: AudioSection
+  audioBuffer: AudioBuffer
 ) {
   const source = audioContext.createBufferSource()
   source.buffer = audioBuffer
-  source.loop = true
-  source.loopStart = section.startSec
-  source.loopEnd = section.endSec
   source.connect(audioContext.destination)
   source.addEventListener("ended", () => {
     try {
@@ -208,17 +235,13 @@ function createLoopSource(
   return source
 }
 
-function safeStopSource(source: AudioBufferSourceNode | null, when?: number) {
+function safeStopSource(source: AudioBufferSourceNode | null) {
   if (!source) {
     return
   }
 
   try {
-    if (typeof when === "number") {
-      source.stop(when)
-    } else {
-      source.stop()
-    }
+    source.stop()
   } catch {}
 
   try {
@@ -226,14 +249,30 @@ function safeStopSource(source: AudioBufferSourceNode | null, when?: number) {
   } catch {}
 }
 
+function getSectionLength(section: AudioSection) {
+  return section.endSec - section.startSec
+}
+
+function getTargetSelection(
+  target: PlaybackTarget | ScheduledPlaybackItem
+): TimelineSelection {
+  return {
+    timelineId: target.timelineId,
+    sectionId: target.section.id,
+  }
+}
+
+function getStateOptions(timeline: PreparedTimeline) {
+  return timeline.compiledProgram?.stateOrder ?? []
+}
+
 export default function Home() {
   const bpmInputRef = useRef<HTMLInputElement | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const scheduledSourceRef = useRef<AudioBufferSourceNode | null>(null)
-  const switchTimeoutRef = useRef<number | null>(null)
-  const sourceStartedAtRef = useRef<number | null>(null)
-  const sourceDurationRef = useRef<number | null>(null)
+  const currentPlaybackRef = useRef<ScheduledPlaybackItem | null>(null)
+  const scheduledPlaybackRef = useRef<ScheduledPlaybackItem | null>(null)
   const dragDepthRef = useRef(0)
   const addFilesRef = useRef<(files: File[]) => Promise<void>>(async () => undefined)
   const hydrateTimelineFromBlobRef =
@@ -242,6 +281,12 @@ export default function Home() {
   const taskCounterRef = useRef(0)
   const persistenceReadyRef = useRef(false)
   const stopPlaybackRef = useRef<(clearActive?: boolean) => void>(() => undefined)
+  const playbackTokenRef = useRef(0)
+  const playbackModeRef = useRef<PlaybackMode>("idle")
+  const codeNavigatorRef = useRef<Navigator | null>(null)
+  const codeRuntimeStatusRef = useRef<NavigatorStatus | null>(null)
+  const preparedTimelinesRef = useRef<PreparedTimeline[]>([])
+  const manualDeferredTargetRef = useRef<PlaybackTarget | null>(null)
 
   const [timelines, setTimelines] = useState<TimelineState[]>([])
   const [bpmInput, setBpmInput] = useState("")
@@ -257,6 +302,9 @@ export default function Home() {
   const [pendingSelection, setPendingSelection] =
     useState<TimelineSelection | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("idle")
+  const [codeRuntimeStatus, setCodeRuntimeStatus] =
+    useState<NavigatorStatus | null>(null)
 
   const bpmValue = Number.parseFloat(bpmInput)
   const bpmIsValid = Number.isFinite(bpmValue) && bpmValue > 0
@@ -278,6 +326,9 @@ export default function Home() {
             durationSec: timeline.audioBuffer.duration,
           })
         : []
+    const codeIsDirty =
+      timeline.lastCompiledDslInput !== timeline.dslInput ||
+      timeline.lastCompiledSectionCount !== sections.length
 
     return {
       ...timeline,
@@ -294,8 +345,12 @@ export default function Home() {
         trimWithinDuration,
         sections,
       }),
+      codeIsDirty,
     }
   })
+
+  preparedTimelinesRef.current = preparedTimelines
+
   const selectedTimeline =
     preparedTimelines.find((timeline) => timeline.id === selectedTimelineId) ??
     preparedTimelines[0] ??
@@ -323,6 +378,23 @@ export default function Home() {
     setPendingSelection(selection)
   }
 
+  function setPlaybackModeValue(nextMode: PlaybackMode) {
+    playbackModeRef.current = nextMode
+    setPlaybackMode(nextMode)
+  }
+
+  function setCodeRuntimeStatusValue(nextStatus: NavigatorStatus | null) {
+    codeRuntimeStatusRef.current = nextStatus
+    setCodeRuntimeStatus(nextStatus)
+  }
+
+  function getPreparedTimelineById(timelineId: string) {
+    return (
+      preparedTimelinesRef.current.find((timeline) => timeline.id === timelineId) ??
+      null
+    )
+  }
+
   function createTaskToken(timelineId: string) {
     const nextToken = taskCounterRef.current + 1
     taskCounterRef.current = nextToken
@@ -334,27 +406,39 @@ export default function Home() {
     return timelineTaskTokensRef.current.get(timelineId) === token
   }
 
-  stopPlaybackRef.current = (clearActive = true) => {
-    if (switchTimeoutRef.current) {
-      window.clearTimeout(switchTimeoutRef.current)
-      switchTimeoutRef.current = null
+  function createPlaybackTarget(
+    timeline: PreparedTimeline,
+    section: AudioSection,
+    stateName: string | null
+  ) {
+    return {
+      timelineId: timeline.id,
+      section,
+      stateName,
+    } satisfies PlaybackTarget
+  }
+
+  function getCodeTargetFromStatus(
+    timeline: PreparedTimeline,
+    status: NavigatorStatus,
+    field: "current" | "next"
+  ) {
+    const sectionNumber =
+      field === "current" ? status.currentSection : status.nextSection
+    const stateName =
+      field === "current" ? status.currentStateName : status.nextStateName
+
+    if (sectionNumber === null || stateName === null) {
+      return null
     }
 
-    safeStopSource(scheduledSourceRef.current)
-    safeStopSource(currentSourceRef.current)
+    const section = timeline.sections[sectionNumber - 1] ?? null
 
-    scheduledSourceRef.current = null
-    currentSourceRef.current = null
-    sourceStartedAtRef.current = null
-    sourceDurationRef.current = null
-
-    updatePendingSelection(null)
-    setIsPlaybackPaused(false)
-    setActiveSectionProgress(0)
-
-    if (clearActive) {
-      updateActiveSelection(null)
+    if (!section) {
+      return null
     }
+
+    return createPlaybackTarget(timeline, section, stateName)
   }
 
   async function ensureAudioContext({ resume = true }: { resume?: boolean } = {}) {
@@ -481,6 +565,7 @@ export default function Home() {
         fileType: file.type,
         fileLastModified: file.lastModified,
         trimInput: "0",
+        dslInput: "",
       }
 
       return {
@@ -510,106 +595,308 @@ export default function Home() {
   addFilesRef.current = addFiles
   hydrateTimelineFromBlobRef.current = hydrateTimelineFromBlob
 
-  async function startLoopNow(timeline: PreparedTimeline, section: AudioSection) {
+  async function scheduleQueuedPlayback(
+    currentItem: ScheduledPlaybackItem,
+    nextTarget: PlaybackTarget | null
+  ) {
+    const audioContext = await ensureAudioContext()
+    const boundaryTime = currentItem.startTime + getSectionLength(currentItem.section)
+
+    if (nextTarget && boundaryTime <= audioContext.currentTime + 0.03) {
+      return false
+    }
+
+    if (!nextTarget) {
+      safeStopSource(scheduledSourceRef.current)
+      scheduledSourceRef.current = null
+      scheduledPlaybackRef.current = null
+      updatePendingSelection(null)
+      return true
+    }
+
+    const nextTimeline = getPreparedTimelineById(nextTarget.timelineId)
+
+    if (!nextTimeline?.audioBuffer) {
+      throw new Error("The queued track is missing its decoded audio buffer.")
+    }
+
+    const queuedItem: ScheduledPlaybackItem = {
+      ...nextTarget,
+      startTime: boundaryTime,
+    }
+    const queuedSource = createSectionSource(
+      audioContext,
+      nextTimeline.audioBuffer
+    )
+
+    queuedSource.start(
+      queuedItem.startTime,
+      nextTarget.section.startSec,
+      getSectionLength(nextTarget.section)
+    )
+
+    safeStopSource(scheduledSourceRef.current)
+    scheduledSourceRef.current = queuedSource
+    scheduledPlaybackRef.current = queuedItem
+    updatePendingSelection(getTargetSelection(queuedItem))
+
+    return true
+  }
+
+  async function handleCurrentSectionEnded(token: number) {
+    if (playbackTokenRef.current !== token) {
+      return
+    }
+
+    const nextCurrentItem = scheduledPlaybackRef.current
+    const nextCurrentSource = scheduledSourceRef.current
+
+    currentSourceRef.current = null
+    scheduledSourceRef.current = null
+    currentPlaybackRef.current = null
+    scheduledPlaybackRef.current = null
+
+    if (!nextCurrentItem || !nextCurrentSource) {
+      currentSourceRef.current = null
+      currentPlaybackRef.current = null
+      manualDeferredTargetRef.current = null
+      codeNavigatorRef.current = null
+      updatePendingSelection(null)
+      updateActiveSelection(null)
+      setActiveSectionProgress(0)
+      setPlaybackModeValue("idle")
+      setCodeRuntimeStatusValue(null)
+      return
+    }
+
+    currentSourceRef.current = nextCurrentSource
+    currentPlaybackRef.current = nextCurrentItem
+    updateActiveSelection(getTargetSelection(nextCurrentItem))
+    setActiveSectionProgress(0)
+
+    const nextToken = playbackTokenRef.current + 1
+    playbackTokenRef.current = nextToken
+    nextCurrentSource.addEventListener(
+      "ended",
+      () => {
+        void handleCurrentSectionEnded(nextToken)
+      },
+      { once: true }
+    )
+
+    let followingTarget: PlaybackTarget | null = null
+
+    if (playbackModeRef.current === "manual") {
+      const deferredTarget = manualDeferredTargetRef.current
+      manualDeferredTargetRef.current = null
+      followingTarget =
+        deferredTarget ??
+        ({
+          timelineId: nextCurrentItem.timelineId,
+          section: nextCurrentItem.section,
+          stateName: null,
+        } satisfies PlaybackTarget)
+      setCodeRuntimeStatusValue(null)
+    } else if (playbackModeRef.current === "code") {
+      const navigator = codeNavigatorRef.current
+      const timeline = getPreparedTimelineById(nextCurrentItem.timelineId)
+
+      if (!navigator || !timeline) {
+        stopPlaybackRef.current()
+        return
+      }
+
+      navigator.tick()
+      const status = navigator.getStatus()
+      setCodeRuntimeStatusValue(status)
+
+      if (status.currentStateName) {
+        updateTimeline(nextCurrentItem.timelineId, (timelineState) => ({
+          ...timelineState,
+          lastActiveCodeState: status.currentStateName,
+        }))
+      }
+
+      followingTarget = getCodeTargetFromStatus(timeline, status, "next")
+    }
+
+    try {
+      const queued = await scheduleQueuedPlayback(nextCurrentItem, followingTarget)
+
+      if (!queued && playbackModeRef.current === "manual" && followingTarget) {
+        manualDeferredTargetRef.current = followingTarget
+        updatePendingSelection(getTargetSelection(nextCurrentItem))
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to queue the next section."
+      )
+      stopPlaybackRef.current()
+    }
+  }
+
+  async function beginPlaybackSequence({
+    timeline,
+    currentTarget,
+    nextTarget,
+    mode,
+    navigator,
+    status,
+  }: {
+    timeline: PreparedTimeline
+    currentTarget: PlaybackTarget
+    nextTarget: PlaybackTarget | null
+    mode: PlaybackMode
+    navigator: Navigator | null
+    status: NavigatorStatus | null
+  }) {
     if (!timeline.audioBuffer) {
       return
     }
 
-    try {
-      const audioContext = await ensureAudioContext()
-      const source = createLoopSource(audioContext, timeline.audioBuffer, section)
-      const startTime = audioContext.currentTime + 0.01
-      const nextSelection = {
-        timelineId: timeline.id,
-        sectionId: section.id,
-      }
+    const audioContext = await ensureAudioContext()
+    const startTime = audioContext.currentTime + 0.01
+    const nextCurrentItem: ScheduledPlaybackItem = {
+      ...currentTarget,
+      startTime,
+    }
+    const nextToken = playbackTokenRef.current + 1
+    playbackTokenRef.current = nextToken
 
-      stopPlaybackRef.current(false)
+    safeStopSource(scheduledSourceRef.current)
+    safeStopSource(currentSourceRef.current)
 
-      source.start(startTime, section.startSec)
-      currentSourceRef.current = source
-      sourceStartedAtRef.current = startTime
-      sourceDurationRef.current = section.endSec - section.startSec
+    currentSourceRef.current = null
+    scheduledSourceRef.current = null
+    currentPlaybackRef.current = null
+    scheduledPlaybackRef.current = null
+    manualDeferredTargetRef.current = null
 
-      setSelectedTimelineId(timeline.id)
-      updateActiveSelection(nextSelection)
-      setActiveSectionProgress(0)
-      setIsPlaybackPaused(false)
-      updatePendingSelection(null)
-      setErrorMessage(null)
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to start playback."
-      )
+    const currentSource = createSectionSource(
+      audioContext,
+      timeline.audioBuffer
+    )
+
+    currentSource.start(
+      nextCurrentItem.startTime,
+      currentTarget.section.startSec,
+      getSectionLength(currentTarget.section)
+    )
+
+    currentSource.addEventListener(
+      "ended",
+      () => {
+        void handleCurrentSectionEnded(nextToken)
+      },
+      { once: true }
+    )
+
+    currentSourceRef.current = currentSource
+    currentPlaybackRef.current = nextCurrentItem
+    codeNavigatorRef.current = mode === "code" ? navigator : null
+    setPlaybackModeValue(mode)
+    setCodeRuntimeStatusValue(mode === "code" ? status : null)
+    setSelectedTimelineId(timeline.id)
+    updateActiveSelection(getTargetSelection(nextCurrentItem))
+    updatePendingSelection(null)
+    setActiveSectionProgress(0)
+    setIsPlaybackPaused(false)
+    setErrorMessage(null)
+
+    const queued = await scheduleQueuedPlayback(nextCurrentItem, nextTarget)
+
+    if (!queued && mode === "manual" && nextTarget) {
+      manualDeferredTargetRef.current = nextTarget
+      updatePendingSelection(getTargetSelection(nextCurrentItem))
     }
   }
 
-  async function scheduleLoopSwitch(
+  stopPlaybackRef.current = (clearActive = true) => {
+    playbackTokenRef.current += 1
+    safeStopSource(scheduledSourceRef.current)
+    safeStopSource(currentSourceRef.current)
+    currentSourceRef.current = null
+    scheduledSourceRef.current = null
+    currentPlaybackRef.current = null
+    scheduledPlaybackRef.current = null
+    codeNavigatorRef.current = null
+    manualDeferredTargetRef.current = null
+    updatePendingSelection(null)
+    setPlaybackModeValue("idle")
+    setCodeRuntimeStatusValue(null)
+    setIsPlaybackPaused(false)
+    setActiveSectionProgress(0)
+
+    if (clearActive) {
+      updateActiveSelection(null)
+    }
+  }
+
+  async function startManualPlayback(
     timeline: PreparedTimeline,
     section: AudioSection
   ) {
-    if (!timeline.audioBuffer || !currentSourceRef.current) {
-      await startLoopNow(timeline, section)
+    const target = createPlaybackTarget(timeline, section, null)
+
+    await beginPlaybackSequence({
+      timeline,
+      currentTarget: target,
+      nextTarget: target,
+      mode: "manual",
+      navigator: null,
+      status: null,
+    })
+  }
+
+  async function queueManualPlayback(
+    timeline: PreparedTimeline,
+    section: AudioSection
+  ) {
+    const currentItem = currentPlaybackRef.current
+
+    if (!currentItem) {
+      await startManualPlayback(timeline, section)
       return
     }
 
-    const startedAt = sourceStartedAtRef.current
-    const currentDuration = sourceDurationRef.current
-    const nextSelection = {
-      timelineId: timeline.id,
-      sectionId: section.id,
+    const target = createPlaybackTarget(timeline, section, null)
+    const queued = await scheduleQueuedPlayback(currentItem, target)
+
+    if (!queued) {
+      manualDeferredTargetRef.current = target
+      updatePendingSelection(getTargetSelection(currentItem))
+    }
+  }
+
+  async function startCodePlayback(
+    timeline: PreparedTimeline,
+    program: CompiledMusicProgram,
+    stateName: string
+  ) {
+    const navigator = createNavigator(program)
+    navigator.start(stateName)
+    const status = navigator.getStatus()
+    const currentTarget = getCodeTargetFromStatus(timeline, status, "current")
+
+    if (!currentTarget) {
+      throw new Error(`State '${stateName}' does not point to a playable section.`)
     }
 
-    if (startedAt === null || currentDuration === null) {
-      await startLoopNow(timeline, section)
-      return
-    }
+    const nextTarget = getCodeTargetFromStatus(timeline, status, "next")
 
-    try {
-      const audioContext = await ensureAudioContext()
-      const nextSource = createLoopSource(audioContext, timeline.audioBuffer, section)
-      const now = audioContext.currentTime
-      const elapsed = Math.max(0, now - startedAt)
-      const completedLoops = Math.max(1, Math.ceil(elapsed / currentDuration))
-      let boundaryTime = startedAt + completedLoops * currentDuration
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      lastActiveCodeState: status.currentStateName,
+    }))
 
-      if (boundaryTime <= now + 0.01) {
-        boundaryTime += currentDuration
-      }
-
-      if (switchTimeoutRef.current) {
-        window.clearTimeout(switchTimeoutRef.current)
-      }
-
-      safeStopSource(scheduledSourceRef.current)
-
-      try {
-        currentSourceRef.current.stop(boundaryTime)
-      } catch {}
-
-      nextSource.start(boundaryTime, section.startSec)
-      scheduledSourceRef.current = nextSource
-
-      switchTimeoutRef.current = window.setTimeout(() => {
-        currentSourceRef.current = nextSource
-        scheduledSourceRef.current = null
-        sourceStartedAtRef.current = boundaryTime
-        sourceDurationRef.current = section.endSec - section.startSec
-        updateActiveSelection(nextSelection)
-        setActiveSectionProgress(0)
-        updatePendingSelection(null)
-        switchTimeoutRef.current = null
-      }, Math.max(0, (boundaryTime - now) * 1000) + 24)
-
-      setSelectedTimelineId(timeline.id)
-      updatePendingSelection(nextSelection)
-      setIsPlaybackPaused(false)
-      setErrorMessage(null)
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to queue the next loop."
-      )
-    }
+    await beginPlaybackSequence({
+      timeline,
+      currentTarget,
+      nextTarget,
+      mode: "code",
+      navigator,
+      status,
+    })
   }
 
   async function togglePlaybackPause() {
@@ -683,8 +970,14 @@ export default function Home() {
       sectionId: section.id,
     })
 
+    if (playbackModeRef.current === "code") {
+      codeNavigatorRef.current = null
+      setCodeRuntimeStatusValue(null)
+      setPlaybackModeValue("manual")
+    }
+
     if (options?.instant) {
-      await startLoopNow(timeline, section)
+      await startManualPlayback(timeline, section)
       return
     }
 
@@ -693,16 +986,159 @@ export default function Home() {
     }
 
     if (nextSelectionKey === activeSelectionKey) {
-      await startLoopNow(timeline, section)
+      await startManualPlayback(timeline, section)
       return
     }
 
-    if (!activeSelection) {
-      await startLoopNow(timeline, section)
+    if (!activeSelection || !currentPlaybackRef.current) {
+      await startManualPlayback(timeline, section)
       return
     }
 
-    await scheduleLoopSwitch(timeline, section)
+    try {
+      await queueManualPlayback(timeline, section)
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to queue the next section."
+      )
+    }
+  }
+
+  async function handleRunCode(timeline: PreparedTimeline) {
+    const compileResult = compileMusicDsl(timeline.dslInput, {
+      file: timeline.fileName,
+      bpm: bpmIsValid ? bpmValue : 0,
+      beatsPerSection: 16,
+      sectionCount: timeline.sections.length,
+    })
+    const compiledProgram = compileResult.program
+    const selectedCodeState =
+      compiledProgram && timeline.selectedCodeState
+        ? compiledProgram.states[timeline.selectedCodeState]
+          ? timeline.selectedCodeState
+          : null
+        : null
+    const fallbackSelectedState =
+      selectedCodeState ?? compiledProgram?.stateOrder[0] ?? null
+    const activeCodeState =
+      playbackModeRef.current === "code" &&
+      activeSelection?.timelineId === timeline.id &&
+      codeRuntimeStatusRef.current?.currentStateName &&
+      compiledProgram?.states[codeRuntimeStatusRef.current.currentStateName]
+        ? codeRuntimeStatusRef.current.currentStateName
+        : null
+
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      compiledProgram: compiledProgram ?? timelineState.compiledProgram,
+      lastCompiledDslInput: compiledProgram
+        ? timeline.dslInput
+        : timelineState.lastCompiledDslInput,
+      lastCompiledSectionCount: compiledProgram
+        ? timeline.sections.length
+        : timelineState.lastCompiledSectionCount,
+      lastRunDiagnostics: compileResult.diagnostics,
+      selectedCodeState: fallbackSelectedState,
+    }))
+
+    if (!compiledProgram) {
+      if (
+        playbackModeRef.current === "code" &&
+        activeSelection?.timelineId === timeline.id
+      ) {
+        stopPlaybackRef.current()
+      }
+      return
+    }
+
+    const startState =
+      activeCodeState ?? fallbackSelectedState ?? compiledProgram.stateOrder[0] ?? null
+
+    if (!startState) {
+      setErrorMessage("The DSL did not produce any playable states.")
+      return
+    }
+
+    try {
+      await startCodePlayback(timeline, compiledProgram, startState)
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to start code playback."
+      )
+    }
+  }
+
+  async function handlePlayCodeState(
+    timeline: PreparedTimeline,
+    stateName: string
+  ) {
+    if (!timeline.compiledProgram || timeline.codeIsDirty) {
+      return
+    }
+
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      selectedCodeState: stateName,
+    }))
+
+    try {
+      await startCodePlayback(timeline, timeline.compiledProgram, stateName)
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to start the selected state."
+      )
+    }
+  }
+
+  async function handleGoToState(
+    timeline: PreparedTimeline,
+    stateName: string
+  ) {
+    if (
+      !timeline.compiledProgram ||
+      timeline.codeIsDirty ||
+      playbackModeRef.current !== "code" ||
+      activeSelection?.timelineId !== timeline.id
+    ) {
+      return
+    }
+
+    const navigator = codeNavigatorRef.current
+
+    if (!navigator) {
+      return
+    }
+
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      selectedCodeState: stateName,
+    }))
+
+    try {
+      navigator.goTo(stateName)
+      const status = navigator.getStatus()
+      setCodeRuntimeStatusValue(status)
+      const currentItem = currentPlaybackRef.current
+
+      if (!currentItem) {
+        return
+      }
+
+      const nextTarget = getCodeTargetFromStatus(timeline, status, "next")
+      const queued = await scheduleQueuedPlayback(currentItem, nextTarget)
+
+      if (!queued) {
+        updatePendingSelection(
+          scheduledPlaybackRef.current
+            ? getTargetSelection(scheduledPlaybackRef.current)
+            : null
+        )
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to queue the next state."
+      )
+    }
   }
 
   function handleSelectedTimelineChange(nextTimelineId: string) {
@@ -733,6 +1169,21 @@ export default function Home() {
     ) {
       stopPlaybackRef.current()
     }
+  }
+
+  function handleDslInputChange(timelineId: string, dslInput: string) {
+    setTimelines((currentTimelines) =>
+      currentTimelines.map((timeline) =>
+        timeline.id === timelineId ? { ...timeline, dslInput } : timeline
+      )
+    )
+  }
+
+  function handleCodeStateSelection(timelineId: string, stateName: string) {
+    updateTimeline(timelineId, (timeline) => ({
+      ...timeline,
+      selectedCodeState: stateName,
+    }))
   }
 
   async function handleTimelineRemove(timelineId: string) {
@@ -869,16 +1320,22 @@ export default function Home() {
 
     const updateProgress = () => {
       const audioContext = audioContextRef.current
-      const startedAt = sourceStartedAtRef.current
-      const duration = sourceDurationRef.current
+      const currentItem = currentPlaybackRef.current
 
-      if (!audioContext || startedAt === null || !duration) {
+      if (!audioContext || !currentItem) {
         setActiveSectionProgress(0)
         return
       }
 
-      const elapsed = Math.max(0, audioContext.currentTime - startedAt)
-      const progress = duration > 0 ? (elapsed % duration) / duration : 0
+      const duration = getSectionLength(currentItem.section)
+
+      if (duration <= 0) {
+        setActiveSectionProgress(0)
+        return
+      }
+
+      const elapsed = Math.max(0, audioContext.currentTime - currentItem.startTime)
+      const progress = Math.max(0, Math.min(1, elapsed / duration))
 
       setActiveSectionProgress(progress)
 
@@ -992,12 +1449,20 @@ export default function Home() {
         bpmInput,
         timelineViewMode,
         timelines: timelines.map(
-          ({ id, fileName, fileType, fileLastModified, trimInput }) => ({
+          ({
             id,
             fileName,
             fileType,
             fileLastModified,
             trimInput,
+            dslInput,
+          }) => ({
+            id,
+            fileName,
+            fileType,
+            fileLastModified,
+            trimInput,
+            dslInput,
           })
         ),
       })
@@ -1031,6 +1496,7 @@ export default function Home() {
       }
     }
   }, [])
+
   const timelineCountLabel = `${timelines.length} ${
     timelines.length === 1 ? "track" : "tracks"
   }`
@@ -1043,6 +1509,21 @@ export default function Home() {
     { label: "Compact timeline", value: "compact-timeline", icon: ViewAgendaIcon },
     { label: "Grid", value: "grid", icon: LayoutGridIcon },
   ]
+
+  const runtimeCurrentSectionLabel =
+    activeSelection && selectedTimeline && activeSelection.timelineId === selectedTimeline.id
+      ? selectedTimeline.sections.find(
+          (section) => section.id === activeSelection.sectionId
+        )?.label ?? "—"
+      : "—"
+  const runtimeQueuedSectionLabel =
+    pendingSelection &&
+    selectedTimeline &&
+    pendingSelection.timelineId === selectedTimeline.id
+      ? selectedTimeline.sections.find(
+          (section) => section.id === pendingSelection.sectionId
+        )?.label ?? "—"
+      : "—"
 
   return (
     <>
@@ -1083,7 +1564,8 @@ export default function Home() {
                   </Badge>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Drop audio anywhere, set one BPM, and queue exact 16-beat loops.
+                  Drop audio anywhere, set one BPM, and drive playback with manual
+                  section picks or the music DSL.
                 </p>
               </div>
 
@@ -1134,7 +1616,7 @@ export default function Home() {
                           />
                           <FieldDescription>
                             {loopDurationSec
-                              ? `${formatDuration(loopDurationSec)} per loop`
+                              ? `${formatDuration(loopDurationSec)} per section`
                               : "Enter a positive BPM"}
                           </FieldDescription>
                         </Field>
@@ -1189,8 +1671,9 @@ export default function Home() {
             <Card className="min-w-0">
               <CardContent className="min-h-48 items-center justify-center py-10 text-center">
                 <p className="max-w-lg text-sm text-muted-foreground">
-                  Drop audio files anywhere to add tracks. Track files and start
-                  offsets are restored locally after refresh when the browser allows it.
+                  Drop audio files anywhere to add tracks. Track files, offsets, and
+                  DSL text are restored locally after refresh when the browser allows
+                  it.
                 </p>
               </CardContent>
             </Card>
@@ -1320,7 +1803,7 @@ export default function Home() {
                     "border-primary/20 bg-card/90"
                 )}
               >
-                <CardContent className="gap-3 px-4 py-4 sm:px-5 sm:py-5">
+                <CardContent className="gap-4 px-4 py-4 sm:px-5 sm:py-5">
                   {selectedTimeline.errorMessage ? (
                     <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                       {selectedTimeline.errorMessage}
@@ -1360,6 +1843,236 @@ export default function Home() {
                     }
                     viewMode={timelineViewMode}
                   />
+
+                  <div className="grid gap-2 rounded-xl border border-border/50 bg-muted/15 p-3 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-muted-foreground">Mode</span>
+                      <span className="font-medium">
+                        {activeSelection?.timelineId === selectedTimeline.id
+                          ? playbackMode === "code"
+                            ? "Code"
+                            : "Manual"
+                          : "Idle"}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-muted-foreground">Current state</span>
+                      <span className="font-medium">
+                        {playbackMode === "code" &&
+                        activeSelection?.timelineId === selectedTimeline.id
+                          ? (codeRuntimeStatus?.currentStateName ?? "—")
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-muted-foreground">Queued state</span>
+                      <span className="font-medium">
+                        {playbackMode === "code" &&
+                        activeSelection?.timelineId === selectedTimeline.id
+                          ? (codeRuntimeStatus?.nextStateName ?? "—")
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-muted-foreground">Current section</span>
+                      <span className="font-medium">{runtimeCurrentSectionLabel}</span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-muted-foreground">Queued section</span>
+                      <span className="font-medium">{runtimeQueuedSectionLabel}</span>
+                    </div>
+                    {playbackMode === "code" &&
+                    activeSelection?.timelineId === selectedTimeline.id &&
+                    codeRuntimeStatus?.pendingTargetStateName ? (
+                      <div className="flex flex-col gap-1 sm:col-span-2 lg:col-span-5">
+                        <span className="text-muted-foreground">Buffered goTo</span>
+                        <span className="font-medium">
+                          {codeRuntimeStatus.pendingTargetStateName}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <FieldGroup className="gap-3">
+                    <Field>
+                      <div className="flex items-center justify-between gap-2">
+                        <FieldLabel htmlFor={`dsl-input-${selectedTimeline.id}`}>
+                          Music DSL
+                        </FieldLabel>
+                        <Badge
+                          variant={
+                            selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty
+                              ? "secondary"
+                              : "outline"
+                          }
+                        >
+                          {selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty
+                            ? "Ready"
+                            : selectedTimeline.codeIsDirty
+                              ? "Dirty"
+                              : "Uncompiled"}
+                        </Badge>
+                      </div>
+                      <Textarea
+                        className="min-h-40 font-mono text-xs"
+                        id={`dsl-input-${selectedTimeline.id}`}
+                        onChange={(event) => {
+                          handleDslInputChange(
+                            selectedTimeline.id,
+                            event.target.value
+                          )
+                        }}
+                        placeholder={`explore: 1{a} (2 3)+\ncombat: {a}4 (5 6)+`}
+                        spellCheck={false}
+                        value={selectedTimeline.dslInput}
+                      />
+                      <FieldDescription>
+                        {selectedTimeline.codeIsDirty
+                          ? "The editor has changes that have not been compiled against the current sections."
+                          : selectedTimeline.compiledProgram
+                            ? `Compiled ${getStateOptions(selectedTimeline).length.toString()} state${
+                                getStateOptions(selectedTimeline).length === 1
+                                  ? ""
+                                  : "s"
+                              } for this track.`
+                            : "Run the code to validate it and enter code mode."}
+                      </FieldDescription>
+                    </Field>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        onClick={() => {
+                          void handleRunCode(selectedTimeline)
+                        }}
+                        type="button"
+                      >
+                        Run
+                      </Button>
+
+                      <div className="min-w-44 flex-1 sm:flex-none">
+                        <Select
+                          onValueChange={(value) => {
+                            handleCodeStateSelection(selectedTimeline.id, value)
+                          }}
+                          value={
+                            selectedTimeline.selectedCodeState ??
+                            getStateOptions(selectedTimeline)[0] ??
+                            ""
+                          }
+                        >
+                          <SelectTrigger
+                            aria-label="Select code state"
+                            className="w-full"
+                            disabled={getStateOptions(selectedTimeline).length === 0}
+                          >
+                            <SelectValue placeholder="Select state" />
+                          </SelectTrigger>
+                          <SelectContent align="start">
+                            <SelectGroup>
+                              {getStateOptions(selectedTimeline).map((stateName) => (
+                                <SelectItem key={stateName} value={stateName}>
+                                  {stateName}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <Button
+                        disabled={
+                          !selectedTimeline.compiledProgram ||
+                          selectedTimeline.codeIsDirty ||
+                          !selectedTimeline.selectedCodeState
+                        }
+                        onClick={() => {
+                          if (selectedTimeline.selectedCodeState) {
+                            void handlePlayCodeState(
+                              selectedTimeline,
+                              selectedTimeline.selectedCodeState
+                            )
+                          }
+                        }}
+                        type="button"
+                        variant="secondary"
+                      >
+                        Play state
+                      </Button>
+
+                      <Button
+                        disabled={
+                          !selectedTimeline.compiledProgram ||
+                          selectedTimeline.codeIsDirty ||
+                          !selectedTimeline.selectedCodeState ||
+                          playbackMode !== "code" ||
+                          activeSelection?.timelineId !== selectedTimeline.id
+                        }
+                        onClick={() => {
+                          if (selectedTimeline.selectedCodeState) {
+                            void handleGoToState(
+                              selectedTimeline,
+                              selectedTimeline.selectedCodeState
+                            )
+                          }
+                        }}
+                        type="button"
+                        variant="outline"
+                      >
+                        Go to state
+                      </Button>
+                    </div>
+
+                    {selectedTimeline.lastRunDiagnostics.length > 0 ? (
+                      <div className="flex flex-col gap-2 rounded-xl border border-border/50 bg-muted/15 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium">Diagnostics</p>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <span>
+                              {
+                                selectedTimeline.lastRunDiagnostics.filter(
+                                  (diagnostic) =>
+                                    diagnostic.severity === "error"
+                                ).length
+                              }{" "}
+                              errors
+                            </span>
+                            <span>
+                              {
+                                selectedTimeline.lastRunDiagnostics.filter(
+                                  (diagnostic) =>
+                                    diagnostic.severity === "warning"
+                                ).length
+                              }{" "}
+                              warnings
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col gap-2">
+                          {selectedTimeline.lastRunDiagnostics.map((diagnostic) => (
+                            <div
+                              className={cn(
+                                "rounded-lg border px-3 py-2 text-sm",
+                                diagnostic.severity === "error"
+                                  ? "border-destructive/20 bg-destructive/10 text-destructive"
+                                  : "border-amber-300/30 bg-amber-300/10 text-amber-900 dark:text-amber-100"
+                              )}
+                              key={`${diagnostic.severity}-${diagnostic.line.toString()}-${diagnostic.column.toString()}-${diagnostic.message}`}
+                            >
+                              <p className="font-medium">
+                                {diagnostic.severity === "error"
+                                  ? "Error"
+                                  : "Warning"}{" "}
+                                · line {diagnostic.line.toString()}, col{" "}
+                                {diagnostic.column.toString()}
+                              </p>
+                              <p>{diagnostic.message}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </FieldGroup>
                 </CardContent>
               </Card>
             </div>
@@ -1371,8 +2084,8 @@ export default function Home() {
             !activeSelection
               ? "Select a loop to play"
               : isPlaybackPaused
-                ? "Resume loop (Space)"
-                : "Pause loop (Space)"
+                ? "Resume playback (Space)"
+                : "Pause playback (Space)"
           }
           className="fixed right-6 bottom-6 z-40 size-14 rounded-full shadow-lg sm:right-8 sm:bottom-8"
           disabled={!activeSelection}
@@ -1384,8 +2097,8 @@ export default function Home() {
             !activeSelection
               ? "Select a loop to play"
               : isPlaybackPaused
-                ? "Resume loop (Space)"
-                : "Pause loop (Space)"
+                ? "Resume playback (Space)"
+                : "Pause playback (Space)"
           }
           type="button"
           variant={activeSelection ? "default" : "outline"}
