@@ -196,8 +196,8 @@ export function AudioWaveform({
         className={cn(
           "group/section absolute overflow-hidden text-left outline-none transition-colors focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring/40",
           compact
-            ? "inset-y-0 cursor-pointer border-r border-border/50 px-1.5 py-2"
-            : "inset-0 cursor-pointer px-2 py-1.5",
+            ? "inset-y-0 cursor-pointer border border-border/25 px-1.5 py-2"
+            : "inset-0 cursor-pointer border border-border/25 px-2 py-1.5",
           className,
           isActive &&
             "z-10 bg-emerald-500/16 text-foreground ring-2 ring-inset ring-emerald-300/75",

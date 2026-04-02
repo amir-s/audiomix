@@ -23,9 +23,6 @@ import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import {
   Field,
@@ -39,6 +36,14 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   AudioSection,
   createAudioSections,
@@ -88,6 +93,20 @@ type PreparedTimeline = TimelineState & {
   durationSec: number
   sections: AudioSection[]
   message: string
+}
+
+function getTimelineSummary(timeline: PreparedTimeline) {
+  if (timeline.isDecoding) {
+    return "Building waveform..."
+  }
+
+  if (timeline.audioBuffer) {
+    return `${formatDuration(timeline.audioBuffer.duration)} · ${
+      timeline.sections.length
+    } section${timeline.sections.length === 1 ? "" : "s"}`
+  }
+
+  return "Waiting for audio"
 }
 
 function createTimelineId() {
@@ -227,6 +246,7 @@ export default function Home() {
   const [timelines, setTimelines] = useState<TimelineState[]>([])
   const [bpmInput, setBpmInput] = useState("")
   const [isDragging, setIsDragging] = useState(false)
+  const [selectedTimelineId, setSelectedTimelineId] = useState<string | null>(null)
   const [timelineViewMode, setTimelineViewMode] =
     useState<TimelineViewMode>("compact-timeline")
   const [isPlaybackPaused, setIsPlaybackPaused] = useState(false)
@@ -276,6 +296,10 @@ export default function Home() {
       }),
     }
   })
+  const selectedTimeline =
+    preparedTimelines.find((timeline) => timeline.id === selectedTimelineId) ??
+    preparedTimelines[0] ??
+    null
 
   const activeSelectionKey = createSelectionKey(activeSelection)
   const pendingSelectionKey = createSelectionKey(pendingSelection)
@@ -507,6 +531,7 @@ export default function Home() {
       sourceStartedAtRef.current = startTime
       sourceDurationRef.current = section.endSec - section.startSec
 
+      setSelectedTimelineId(timeline.id)
       updateActiveSelection(nextSelection)
       setActiveSectionProgress(0)
       setIsPlaybackPaused(false)
@@ -576,6 +601,7 @@ export default function Home() {
         switchTimeoutRef.current = null
       }, Math.max(0, (boundaryTime - now) * 1000) + 24)
 
+      setSelectedTimelineId(timeline.id)
       updatePendingSelection(nextSelection)
       setIsPlaybackPaused(false)
       setErrorMessage(null)
@@ -679,6 +705,21 @@ export default function Home() {
     await scheduleLoopSwitch(timeline, section)
   }
 
+  function handleSelectedTimelineChange(nextTimelineId: string) {
+    if (nextTimelineId === selectedTimelineId) {
+      return
+    }
+
+    if (
+      (activeSelection !== null && activeSelection.timelineId !== nextTimelineId) ||
+      (pendingSelection !== null && pendingSelection.timelineId !== nextTimelineId)
+    ) {
+      stopPlaybackRef.current()
+    }
+
+    setSelectedTimelineId(nextTimelineId)
+  }
+
   function handleTrimInputChange(timelineId: string, trimInput: string) {
     setTimelines((currentTimelines) =>
       currentTimelines.map((timeline) =>
@@ -695,10 +736,19 @@ export default function Home() {
   }
 
   async function handleTimelineRemove(timelineId: string) {
+    const timelineIndex = timelines.findIndex((timeline) => timeline.id === timelineId)
+    const fallbackTimeline =
+      timelines[timelineIndex + 1] ?? timelines[timelineIndex - 1] ?? null
+
     timelineTaskTokensRef.current.delete(timelineId)
 
     setTimelines((currentTimelines) =>
       currentTimelines.filter((timeline) => timeline.id !== timelineId)
+    )
+    setSelectedTimelineId((currentSelectedTimelineId) =>
+      currentSelectedTimelineId === timelineId
+        ? (fallbackTimeline?.id ?? null)
+        : currentSelectedTimelineId
     )
 
     if (
@@ -718,6 +768,23 @@ export default function Home() {
       )
     }
   }
+
+  useEffect(() => {
+    if (preparedTimelines.length === 0) {
+      if (selectedTimelineId !== null) {
+        setSelectedTimelineId(null)
+      }
+      return
+    }
+
+    const hasSelectedTimeline = preparedTimelines.some(
+      (timeline) => timeline.id === selectedTimelineId
+    )
+
+    if (!hasSelectedTimeline) {
+      setSelectedTimelineId(preparedTimelines[0].id)
+    }
+  }, [preparedTimelines, selectedTimelineId])
 
   useEffect(() => {
     function hasFiles(event: DragEvent) {
@@ -1118,7 +1185,7 @@ export default function Home() {
             ) : null}
           </section>
 
-          {preparedTimelines.length === 0 ? (
+          {selectedTimeline === null ? (
             <Card className="min-w-0">
               <CardContent className="min-h-48 items-center justify-center py-10 text-center">
                 <p className="max-w-lg text-sm text-muted-foreground">
@@ -1128,167 +1195,174 @@ export default function Home() {
               </CardContent>
             </Card>
           ) : (
-            preparedTimelines.map((timeline) => {
-              const isTimelineActive = activeSelection?.timelineId === timeline.id
-              const timelineSummary = timeline.isDecoding
-                ? "Building waveform..."
-                : timeline.audioBuffer
-                  ? `${formatDuration(timeline.audioBuffer.duration)} · ${
-                      timeline.sections.length
-                    } section${timeline.sections.length === 1 ? "" : "s"}`
-                  : "Waiting for audio"
+            <div className="flex flex-col gap-2" key={selectedTimeline.id}>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="min-w-0 flex-1 basis-64">
+                  <Select
+                    onValueChange={handleSelectedTimelineChange}
+                    value={selectedTimeline.id}
+                  >
+                    <SelectTrigger
+                      aria-label="Select track"
+                      className="w-full max-w-sm"
+                    >
+                      <SelectValue placeholder="Select track" />
+                    </SelectTrigger>
+                    <SelectContent align="start">
+                      <SelectGroup>
+                        {preparedTimelines.map((timeline) => (
+                          <SelectItem key={timeline.id} value={timeline.id}>
+                            {timeline.fileName}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
 
-              return (
-                <Card
-                  className={cn(
-                    "min-w-0",
-                    isTimelineActive && "border-primary/20 bg-card/90"
-                  )}
-                  key={timeline.id}
-                >
-                  <CardHeader className="gap-2 px-4 py-4 sm:px-5 sm:py-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <CardTitle className="min-w-0 truncate">
-                          {timeline.fileName}
-                        </CardTitle>
-                        <CardDescription className="mt-1 truncate">
-                          {timelineSummary}
-                        </CardDescription>
-                      </div>
+                <div className="flex items-center gap-1">
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        aria-label={`Open settings for ${selectedTimeline.fileName}`}
+                        size="icon-sm"
+                        title={`Settings for ${selectedTimeline.fileName}`}
+                        type="button"
+                        variant="ghost"
+                      >
+                        <HugeiconsIcon icon={MoreHorizontalIcon} size={16} />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" className="w-60 p-3">
+                      <div className="flex flex-col gap-3">
+                        <p className="truncate text-sm font-semibold tracking-tight">
+                          {selectedTimeline.fileName}
+                        </p>
 
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            aria-label={`Open settings for ${timeline.fileName}`}
-                            size="icon-sm"
-                            title={`Settings for ${timeline.fileName}`}
-                            type="button"
-                            variant="ghost"
+                        <FieldGroup className="gap-2.5">
+                          <Field
+                            className="max-w-xs"
+                            data-invalid={
+                              selectedTimeline.trimInput !== "" &&
+                              !selectedTimeline.trimHasValidRange
+                            }
                           >
-                            <HugeiconsIcon icon={MoreHorizontalIcon} size={16} />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent align="end" className="w-60 p-3">
-                          <div className="flex flex-col gap-3">
-                            <p className="truncate text-sm font-semibold tracking-tight">
-                              {timeline.fileName}
-                            </p>
-
-                            <FieldGroup className="gap-2.5">
-                              <Field
-                                className="max-w-xs"
-                                data-invalid={
-                                  timeline.trimInput !== "" &&
-                                  !timeline.trimHasValidRange
-                                }
+                            <div className="flex items-center justify-between gap-2">
+                              <FieldLabel
+                                htmlFor={`trim-input-${selectedTimeline.id}`}
                               >
-                                <div className="flex items-center justify-between gap-2">
-                                  <FieldLabel htmlFor={`trim-input-${timeline.id}`}>
-                                    Start
-                                  </FieldLabel>
-                                  <span className="text-xs text-muted-foreground">
-                                    ms
-                                  </span>
-                                </div>
-                                <Input
-                                  aria-invalid={
-                                    timeline.trimInput !== "" &&
-                                    !timeline.trimHasValidRange
-                                  }
-                                  className="h-8"
-                                  id={`trim-input-${timeline.id}`}
-                                  inputMode="numeric"
-                                  min="0"
-                                  onChange={(event) => {
-                                    handleTrimInputChange(
-                                      timeline.id,
-                                      event.target.value
-                                    )
-                                  }}
-                                  placeholder="0"
-                                  step="1"
-                                  type="number"
-                                  value={timeline.trimInput}
-                                />
-                                <FieldDescription>
-                                  {timeline.trimInput !== "" &&
-                                  !timeline.trimHasValidRange
-                                    ? "Choose a start inside the track."
-                                    : `Starts at ${formatMilliseconds(
-                                        timeline.trimIsValid
-                                          ? timeline.trimValue
-                                          : 0
-                                      )}.`}
-                                </FieldDescription>
-                              </Field>
-                            </FieldGroup>
-
-                            <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
-                              <p className="text-xs text-muted-foreground">
-                                Remove track
-                              </p>
-                              <Button
-                                aria-label={`Remove ${timeline.fileName}`}
-                                onClick={() => {
-                                  void handleTimelineRemove(timeline.id)
-                                }}
-                                size="xs"
-                                title={`Remove ${timeline.fileName}`}
-                                type="button"
-                                variant="destructive"
-                              >
-                                <HugeiconsIcon
-                                  data-icon="inline-start"
-                                  icon={Delete01Icon}
-                                  size={14}
-                                />
-                                <span>Remove</span>
-                              </Button>
+                                Start
+                              </FieldLabel>
+                              <span className="text-xs text-muted-foreground">
+                                ms
+                              </span>
                             </div>
-                          </div>
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="gap-3 px-4 pb-4 pt-0 sm:px-5 sm:pb-5">
-                    {timeline.errorMessage ? (
-                      <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                        {timeline.errorMessage}
+                            <Input
+                              aria-invalid={
+                                selectedTimeline.trimInput !== "" &&
+                                !selectedTimeline.trimHasValidRange
+                              }
+                              className="h-8"
+                              id={`trim-input-${selectedTimeline.id}`}
+                              inputMode="numeric"
+                              min="0"
+                              onChange={(event) => {
+                                handleTrimInputChange(
+                                  selectedTimeline.id,
+                                  event.target.value
+                                )
+                              }}
+                              placeholder="0"
+                              step="1"
+                              type="number"
+                              value={selectedTimeline.trimInput}
+                            />
+                            <FieldDescription>
+                              {selectedTimeline.trimInput !== "" &&
+                              !selectedTimeline.trimHasValidRange
+                                ? "Choose a start inside the track."
+                                : `Starts at ${formatMilliseconds(
+                                    selectedTimeline.trimIsValid
+                                      ? selectedTimeline.trimValue
+                                      : 0
+                                  )}.`}
+                            </FieldDescription>
+                          </Field>
+                        </FieldGroup>
                       </div>
-                    ) : null}
+                    </PopoverContent>
+                  </Popover>
 
-                    <AudioWaveform
-                      activeSectionId={
-                        activeSelection?.timelineId === timeline.id
-                          ? activeSelection.sectionId
-                          : null
-                      }
-                      activeSectionProgress={
-                        activeSelection?.timelineId === timeline.id
-                          ? activeSectionProgress
-                          : 0
-                      }
-                      disabled={timeline.isDecoding || !timeline.audioBuffer}
-                      durationSec={timeline.durationSec}
-                      emptyMessage={timeline.message}
-                      onSectionSelect={(section, options) => {
-                        void handleSectionSelect(timeline, section, options)
-                      }}
-                      peaks={timeline.waveformPeaks}
-                      pendingSectionId={
-                        pendingSelection?.timelineId === timeline.id
-                          ? pendingSelection.sectionId
-                          : null
-                      }
-                      sections={timeline.sections}
-                      trimSec={timeline.trimIsValid ? timeline.trimValue / 1000 : null}
-                      viewMode={timelineViewMode}
-                    />
-                  </CardContent>
-                </Card>
-              )
-            })
+                  <Button
+                    aria-label={`Remove ${selectedTimeline.fileName}`}
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() => {
+                      void handleTimelineRemove(selectedTimeline.id)
+                    }}
+                    size="icon-sm"
+                    title={`Remove ${selectedTimeline.fileName}`}
+                    type="button"
+                    variant="ghost"
+                  >
+                    <HugeiconsIcon icon={Delete01Icon} size={16} />
+                  </Button>
+                </div>
+              </div>
+
+              <p className="truncate text-sm text-muted-foreground">
+                {getTimelineSummary(selectedTimeline)}
+              </p>
+
+              <Card
+                className={cn(
+                  "min-w-0",
+                  activeSelection?.timelineId === selectedTimeline.id &&
+                    "border-primary/20 bg-card/90"
+                )}
+              >
+                <CardContent className="gap-3 px-4 py-4 sm:px-5 sm:py-5">
+                  {selectedTimeline.errorMessage ? (
+                    <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                      {selectedTimeline.errorMessage}
+                    </div>
+                  ) : null}
+
+                  <AudioWaveform
+                    activeSectionId={
+                      activeSelection?.timelineId === selectedTimeline.id
+                        ? activeSelection.sectionId
+                        : null
+                    }
+                    activeSectionProgress={
+                      activeSelection?.timelineId === selectedTimeline.id
+                        ? activeSectionProgress
+                        : 0
+                    }
+                    disabled={
+                      selectedTimeline.isDecoding || !selectedTimeline.audioBuffer
+                    }
+                    durationSec={selectedTimeline.durationSec}
+                    emptyMessage={selectedTimeline.message}
+                    onSectionSelect={(section, options) => {
+                      void handleSectionSelect(selectedTimeline, section, options)
+                    }}
+                    peaks={selectedTimeline.waveformPeaks}
+                    pendingSectionId={
+                      pendingSelection?.timelineId === selectedTimeline.id
+                        ? pendingSelection.sectionId
+                        : null
+                    }
+                    sections={selectedTimeline.sections}
+                    trimSec={
+                      selectedTimeline.trimIsValid
+                        ? selectedTimeline.trimValue / 1000
+                        : null
+                    }
+                    viewMode={timelineViewMode}
+                  />
+                </CardContent>
+              </Card>
+            </div>
           )}
         </main>
 
