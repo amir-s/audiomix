@@ -352,6 +352,22 @@ function getStateOptions(timeline: PreparedTimeline) {
   return timeline.compiledProgram?.stateOrder ?? []
 }
 
+function getDslDebugOutput(timeline: PreparedTimeline) {
+  return JSON.stringify(
+    {
+      codeIsDirty: timeline.codeIsDirty,
+      selectedCodeState: timeline.selectedCodeState,
+      lastActiveCodeState: timeline.lastActiveCodeState,
+      lastCompiledDslInput: timeline.lastCompiledDslInput,
+      lastCompiledSectionCount: timeline.lastCompiledSectionCount,
+      diagnostics: timeline.lastRunDiagnostics,
+      compiledProgram: timeline.compiledProgram,
+    },
+    null,
+    2
+  )
+}
+
 export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null)
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
@@ -455,6 +471,9 @@ export default function Home() {
     preparedTimelines.find((timeline) => timeline.id === selectedTimelineId) ??
     preparedTimelines[0] ??
     null
+  const selectedTimelineDslDebugOutput = selectedTimeline
+    ? getDslDebugOutput(selectedTimeline)
+    : ""
 
   const activeSelectionKey = createSelectionKey(activeSelection)
   const pendingSelectionKey = createSelectionKey(pendingSelection)
@@ -2394,6 +2413,35 @@ export default function Home() {
                       >
                         Run
                       </Button>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button type="button" variant="outline">
+                            Compiled
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          className="w-[min(42rem,calc(100vw-2rem))] p-3"
+                        >
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <p className="text-sm font-medium">
+                                Compiled DSL debug
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {selectedTimeline.lastCompiledDslInput === null
+                                  ? "Run the DSL to capture a compiled snapshot."
+                                  : selectedTimeline.codeIsDirty
+                                    ? "Showing the last successful compile. The editor has uncompiled changes."
+                                    : "Showing the latest compiled snapshot for this timeline."}
+                              </p>
+                            </div>
+                            <pre className="max-h-96 overflow-auto rounded-lg border border-border/50 bg-muted/20 p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">
+                              <code>{selectedTimelineDslDebugOutput}</code>
+                            </pre>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
                     </div>
 
                     {selectedTimelineStateOptions.length > 0 ? (
