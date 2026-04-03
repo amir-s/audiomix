@@ -18,6 +18,7 @@ import {
 } from "@hugeicons/core-free-icons"
 
 import { AudioWaveform, TimelineViewMode } from "@/components/audio-waveform"
+import { MusicDslEditor } from "@/components/music-dsl-editor"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -41,7 +42,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Textarea } from "@/components/ui/textarea"
 import {
   AudioSection,
   CROSSFADE_DURATION_SEC,
@@ -553,6 +553,7 @@ export default function Home() {
 
   function getCodeTargetFromStatus(
     timeline: PreparedTimeline,
+    program: CompiledMusicProgram | null,
     status: NavigatorStatus,
     field: "current" | "next"
   ) {
@@ -569,14 +570,13 @@ export default function Home() {
       sectionNumber === null ||
       stateName === null ||
       instructionIndex === null ||
-      !timeline.compiledProgram
+      !program
     ) {
       return null
     }
 
     const section = timeline.sections[sectionNumber - 1] ?? null
-    const instruction =
-      timeline.compiledProgram.states[stateName]?.instructions[instructionIndex] ?? null
+    const instruction = program.states[stateName]?.instructions[instructionIndex] ?? null
 
     if (!section || !instruction || instruction.section !== sectionNumber) {
       return null
@@ -972,7 +972,12 @@ export default function Home() {
         }))
       }
 
-      followingTarget = getCodeTargetFromStatus(timeline, status, "next")
+      followingTarget = getCodeTargetFromStatus(
+        timeline,
+        timeline.compiledProgram,
+        status,
+        "next"
+      )
     }
 
     try {
@@ -1136,13 +1141,18 @@ export default function Home() {
     const navigator = createNavigator(program)
     navigator.start(stateName)
     const status = navigator.getStatus()
-    const currentTarget = getCodeTargetFromStatus(timeline, status, "current")
+    const currentTarget = getCodeTargetFromStatus(
+      timeline,
+      program,
+      status,
+      "current"
+    )
 
     if (!currentTarget) {
       throw new Error(`State '${stateName}' does not point to a playable section.`)
     }
 
-    const nextTarget = getCodeTargetFromStatus(timeline, status, "next")
+    const nextTarget = getCodeTargetFromStatus(timeline, program, status, "next")
 
     updateTimeline(timeline.id, (timelineState) => ({
       ...timelineState,
@@ -1385,7 +1395,12 @@ export default function Home() {
         return
       }
 
-      const nextTarget = getCodeTargetFromStatus(timeline, status, "next")
+      const nextTarget = getCodeTargetFromStatus(
+        timeline,
+        timeline.compiledProgram,
+        status,
+        "next"
+      )
       const queued = await scheduleQueuedPlayback(currentItem, nextTarget)
 
       if (!queued) {
@@ -2349,17 +2364,12 @@ export default function Home() {
                               : "Uncompiled"}
                         </Badge>
                       </div>
-                      <Textarea
-                        className="min-h-40 font-mono text-xs"
+                      <MusicDslEditor
                         id={`dsl-input-${selectedTimeline.id}`}
-                        onChange={(event) => {
-                          handleDslInputChange(
-                            selectedTimeline.id,
-                            event.target.value
-                          )
+                        onChange={(dslInput) => {
+                          handleDslInputChange(selectedTimeline.id, dslInput)
                         }}
                         placeholder={`explore: 1{a} (2 3)+\ncombat: {a}4 (5 6)+`}
-                        spellCheck={false}
                         value={selectedTimeline.dslInput}
                       />
                       <FieldDescription>

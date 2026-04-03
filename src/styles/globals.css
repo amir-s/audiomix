@@ -31,6 +31,11 @@
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  --dsl-token-state: oklch(0.53 0.12 255);
+  --dsl-token-label: oklch(0.58 0.11 170);
+  --dsl-token-number: oklch(0.62 0.13 70);
+  --dsl-token-operator: oklch(0.6 0.15 28);
+  --dsl-token-punctuation: var(--muted-foreground);
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
@@ -111,6 +116,11 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
+    --dsl-token-state: oklch(0.77 0.12 255);
+    --dsl-token-label: oklch(0.8 0.11 170);
+    --dsl-token-number: oklch(0.84 0.12 78);
+    --dsl-token-operator: oklch(0.78 0.16 28);
+    --dsl-token-punctuation: var(--muted-foreground);
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -126,6 +136,46 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--app-font-sans);
+}
+
+.music-dsl-editor__pre,
+.music-dsl-editor__textarea {
+  min-height: 10rem;
+}
+
+.music-dsl-editor__pre {
+  color: var(--foreground);
+}
+
+.music-dsl-editor__textarea {
+  color: inherit;
+  caret-color: var(--foreground);
+  outline: none;
+}
+
+.music-dsl-editor__textarea::placeholder {
+  color: var(--muted-foreground);
+  -webkit-text-fill-color: var(--muted-foreground);
+}
+
+.music-dsl-editor .token.keyword {
+  color: var(--dsl-token-state);
+}
+
+.music-dsl-editor .token.symbol {
+  color: var(--dsl-token-label);
+}
+
+.music-dsl-editor .token.number {
+  color: var(--dsl-token-number);
+}
+
+.music-dsl-editor .token.operator {
+  color: var(--dsl-token-operator);
+}
+
+.music-dsl-editor .token.punctuation {
+  color: var(--dsl-token-punctuation);
 }
 
 .dark {
@@ -152,6 +202,11 @@ body {
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  --dsl-token-state: oklch(0.77 0.12 255);
+  --dsl-token-label: oklch(0.8 0.11 170);
+  --dsl-token-number: oklch(0.84 0.12 78);
+  --dsl-token-operator: oklch(0.78 0.16 28);
+  --dsl-token-punctuation: var(--muted-foreground);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);
