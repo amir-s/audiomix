@@ -1,8 +1,8 @@
 import { Queue02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
 import { AudioSection, formatMilliseconds } from "@/lib/audio";
+import { cn } from "@/lib/utils";
 
 export type TimelineViewMode = "compact-timeline" | "grid";
 
@@ -335,12 +335,12 @@ export function AudioWaveform({
                 className="flex gap-px justify-start"
                 key={`row-${rowIndex}`}
               >
-              {row.map((section) =>
-                renderStandaloneSection(section, {
-                  className: "grow-0 shrink-0",
-                  style: { flexBasis: sectionWidth, maxWidth: sectionWidth },
-                })
-              )}
+                {row.map((section) =>
+                  renderStandaloneSection(section, {
+                    className: "grow-0 shrink-0",
+                    style: { flexBasis: sectionWidth, maxWidth: sectionWidth },
+                  })
+                )}
               </div>
             );
           })}

@@ -88,8 +88,10 @@ main: {a}3 4+
   assert.deepEqual(navigator.getStatus(), {
     currentStateName: "intro",
     currentSection: 1,
+    currentInstructionIndex: 0,
     nextStateName: "intro",
     nextSection: 2,
+    nextInstructionIndex: 1,
     pendingTargetStateName: "main",
     nextComesFromPendingTransition: false,
   });
@@ -98,13 +100,17 @@ main: {a}3 4+
   assert.equal(navigator.current(), 2);
   assert.equal(navigator.next(), 3);
   assert.equal(navigator.getStatus().nextComesFromPendingTransition, true);
+  assert.equal(navigator.getStatus().currentInstructionIndex, 1);
+  assert.equal(navigator.getStatus().nextInstructionIndex, 0);
 
   navigator.tick();
   assert.deepEqual(navigator.getStatus(), {
     currentStateName: "main",
     currentSection: 3,
+    currentInstructionIndex: 0,
     nextStateName: "main",
     nextSection: 4,
+    nextInstructionIndex: 1,
     pendingTargetStateName: null,
     nextComesFromPendingTransition: false,
   });
@@ -144,6 +150,148 @@ beta: {a}4+
   navigator.tick();
   assert.equal(navigator.current(), 4);
   assert.equal(navigator.getStatus().currentStateName, "beta");
+});
+
+test("compiles section crossfade modifiers with labels and repeats", () => {
+  const program = compileProgram(`
+main: 1 2! !3 !4! 5!{a}+ {b}!6 {c}!7!{d}+
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      entryLabel: instruction.entryLabel,
+      exitLabel: instruction.exitLabel,
+      loopTo: instruction.loopTo,
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })),
+    [
+      {
+        section: 1,
+        entryLabel: null,
+        exitLabel: null,
+        loopTo: null,
+        fadeIn: false,
+        fadeOut: false,
+      },
+      {
+        section: 2,
+        entryLabel: null,
+        exitLabel: null,
+        loopTo: null,
+        fadeIn: false,
+        fadeOut: true,
+      },
+      {
+        section: 3,
+        entryLabel: null,
+        exitLabel: null,
+        loopTo: null,
+        fadeIn: true,
+        fadeOut: false,
+      },
+      {
+        section: 4,
+        entryLabel: null,
+        exitLabel: null,
+        loopTo: null,
+        fadeIn: true,
+        fadeOut: true,
+      },
+      {
+        section: 5,
+        entryLabel: null,
+        exitLabel: "a",
+        loopTo: 4,
+        fadeIn: false,
+        fadeOut: true,
+      },
+      {
+        section: 6,
+        entryLabel: "b",
+        exitLabel: null,
+        loopTo: null,
+        fadeIn: true,
+        fadeOut: false,
+      },
+      {
+        section: 7,
+        entryLabel: "c",
+        exitLabel: "d",
+        loopTo: 6,
+        fadeIn: true,
+        fadeOut: true,
+      },
+    ],
+  );
+});
+
+test("expands group crossfade modifiers onto descendant sections", () => {
+  const program = compileProgram(`
+main: !(1 2 3)!+
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      loopTo: instruction.loopTo,
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })),
+    [
+      { section: 1, loopTo: null, fadeIn: true, fadeOut: true },
+      { section: 2, loopTo: null, fadeIn: true, fadeOut: true },
+      { section: 3, loopTo: 0, fadeIn: true, fadeOut: true },
+    ],
+  );
+});
+
+test("merges nested group and section crossfade modifiers", () => {
+  const program = compileProgram(`
+main: !(1 (2! 3))!+
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      loopTo: instruction.loopTo,
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })),
+    [
+      { section: 1, loopTo: null, fadeIn: true, fadeOut: true },
+      { section: 2, loopTo: null, fadeIn: true, fadeOut: true },
+      { section: 3, loopTo: 0, fadeIn: true, fadeOut: true },
+    ],
+  );
+});
+
+test("navigator status exposes instruction indexes for repeated sections", () => {
+  const program = compileProgram(`
+loop: 1 2 1 3+
+`);
+  const navigator = createNavigator(program);
+
+  navigator.start("loop");
+  assert.deepEqual(navigator.getStatus(), {
+    currentStateName: "loop",
+    currentSection: 1,
+    currentInstructionIndex: 0,
+    nextStateName: "loop",
+    nextSection: 2,
+    nextInstructionIndex: 1,
+    pendingTargetStateName: null,
+    nextComesFromPendingTransition: false,
+  });
+
+  navigator.tick();
+  assert.equal(navigator.getStatus().currentInstructionIndex, 1);
+  assert.equal(navigator.getStatus().nextInstructionIndex, 2);
+
+  navigator.tick();
+  assert.equal(navigator.current(), 1);
+  assert.equal(navigator.getStatus().currentInstructionIndex, 2);
 });
 
 test("exhausting states return null once playback reaches the end", () => {

@@ -44,6 +44,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   AudioSection,
+  CROSSFADE_DURATION_SEC,
   createAudioSections,
   extractWaveformPeaks,
   formatDuration,
@@ -93,14 +94,28 @@ type TimelineSelection = {
   sectionId: string
 }
 
+type FadeControls = {
+  fadeIn: boolean
+  fadeOut: boolean
+}
+
 type PlaybackTarget = {
   timelineId: string
   section: AudioSection
   stateName: string | null
+  crossfadeDurationSec: number
+  fadeIn: boolean
+  fadeOut: boolean
 }
 
 type ScheduledPlaybackItem = PlaybackTarget & {
   startTime: number
+}
+
+type AudioOverlayHandle = {
+  source: AudioBufferSourceNode
+  gainNode: GainNode
+  cleanup: () => void
 }
 
 type HydrateTimelineFromBlob = (
@@ -110,6 +125,12 @@ type HydrateTimelineFromBlob = (
 ) => Promise<void>
 
 type PreparedTimeline = TimelineState & {
+  bpmValue: number
+  bpmIsValid: boolean
+  loopDurationSec: number | null
+  crossfadeDurationValueMs: number
+  crossfadeDurationIsValid: boolean
+  crossfadeDurationSec: number
   trimValue: number
   trimIsValid: boolean
   trimWithinDuration: boolean
@@ -147,6 +168,13 @@ function createSelectionKey(selection: TimelineSelection | null) {
   }
 
   return `${selection.timelineId}:${selection.sectionId}`
+}
+
+function getDefaultFadeControls(): FadeControls {
+  return {
+    fadeIn: false,
+    fadeOut: false,
+  }
 }
 
 function isTimelineViewMode(value: string): value is TimelineViewMode {
@@ -219,6 +247,12 @@ function getTimelineWaveformMessage({
   return "Click a section to play it manually. In code mode, the current and queued sections follow the DSL."
 }
 
+const SCHEDULING_LEEWAY_SEC = 0.03
+const CROSSFADE_EDGE_EPSILON_SEC = 0.0001
+const DEFAULT_CROSSFADE_DURATION_INPUT = String(
+  Math.round(CROSSFADE_DURATION_SEC * 1000)
+)
+
 function createSectionSource(
   audioContext: AudioContext,
   audioBuffer: AudioBuffer
@@ -249,6 +283,58 @@ function safeStopSource(source: AudioBufferSourceNode | null) {
   } catch {}
 }
 
+function createOverlayHandle(
+  audioContext: AudioContext,
+  audioBuffer: AudioBuffer,
+  liveOverlays: Set<AudioOverlayHandle>
+) {
+  const source = audioContext.createBufferSource()
+  const gainNode = audioContext.createGain()
+  let cleanedUp = false
+
+  source.buffer = audioBuffer
+  source.connect(gainNode)
+  gainNode.connect(audioContext.destination)
+
+  const handle = {
+    source,
+    gainNode,
+    cleanup: () => {
+      if (cleanedUp) {
+        return
+      }
+
+      cleanedUp = true
+      liveOverlays.delete(handle)
+
+      try {
+        source.disconnect()
+      } catch {}
+
+      try {
+        gainNode.disconnect()
+      } catch {}
+    },
+  } satisfies AudioOverlayHandle
+
+  liveOverlays.add(handle)
+  source.addEventListener("ended", handle.cleanup, { once: true })
+
+  return handle
+}
+
+function safeStopOverlay(handle: AudioOverlayHandle | null) {
+  if (!handle) {
+    return
+  }
+
+  try {
+    handle.source.stop()
+  } catch {}
+
+  handle.cleanup()
+}
+
 function getSectionLength(section: AudioSection) {
   return section.endSec - section.startSec
 }
@@ -267,12 +353,14 @@ function getStateOptions(timeline: PreparedTimeline) {
 }
 
 export default function Home() {
-  const bpmInputRef = useRef<HTMLInputElement | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const scheduledSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const currentPlaybackRef = useRef<ScheduledPlaybackItem | null>(null)
   const scheduledPlaybackRef = useRef<ScheduledPlaybackItem | null>(null)
+  const liveAudioOverlaysRef = useRef(new Set<AudioOverlayHandle>())
+  const currentFadeOutOverlayRef = useRef<AudioOverlayHandle | null>(null)
+  const queuedFadeInOverlayRef = useRef<AudioOverlayHandle | null>(null)
   const dragDepthRef = useRef(0)
   const addFilesRef = useRef<(files: File[]) => Promise<void>>(async () => undefined)
   const hydrateTimelineFromBlobRef =
@@ -289,7 +377,6 @@ export default function Home() {
   const manualDeferredTargetRef = useRef<PlaybackTarget | null>(null)
 
   const [timelines, setTimelines] = useState<TimelineState[]>([])
-  const [bpmInput, setBpmInput] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [selectedTimelineId, setSelectedTimelineId] = useState<string | null>(null)
   const [timelineViewMode, setTimelineViewMode] =
@@ -306,11 +393,18 @@ export default function Home() {
   const [codeRuntimeStatus, setCodeRuntimeStatus] =
     useState<NavigatorStatus | null>(null)
 
-  const bpmValue = Number.parseFloat(bpmInput)
-  const bpmIsValid = Number.isFinite(bpmValue) && bpmValue > 0
-  const loopDurationSec = bpmIsValid ? getSectionDurationSec(bpmValue) : null
-
   const preparedTimelines: PreparedTimeline[] = timelines.map((timeline) => {
+    const bpmValue = Number.parseFloat(timeline.bpmInput)
+    const bpmIsValid = Number.isFinite(bpmValue) && bpmValue > 0
+    const loopDurationSec = bpmIsValid ? getSectionDurationSec(bpmValue) : null
+    const crossfadeDurationValueMs = Number.parseFloat(
+      timeline.crossfadeDurationInput
+    )
+    const crossfadeDurationIsValid =
+      Number.isFinite(crossfadeDurationValueMs) && crossfadeDurationValueMs >= 0
+    const crossfadeDurationSec = crossfadeDurationIsValid
+      ? crossfadeDurationValueMs / 1000
+      : 0
     const trimValue = Number.parseFloat(timeline.trimInput)
     const trimIsValid = Number.isFinite(trimValue) && trimValue >= 0
     const durationSec = timeline.audioBuffer?.duration ?? 0
@@ -332,6 +426,12 @@ export default function Home() {
 
     return {
       ...timeline,
+      bpmValue,
+      bpmIsValid,
+      loopDurationSec,
+      crossfadeDurationValueMs,
+      crossfadeDurationIsValid,
+      crossfadeDurationSec,
       trimValue,
       trimIsValid,
       trimWithinDuration,
@@ -409,13 +509,46 @@ export default function Home() {
   function createPlaybackTarget(
     timeline: PreparedTimeline,
     section: AudioSection,
-    stateName: string | null
+    stateName: string | null,
+    options?: { fadeIn?: boolean; fadeOut?: boolean }
   ) {
     return {
       timelineId: timeline.id,
       section,
       stateName,
+      crossfadeDurationSec: timeline.crossfadeDurationSec,
+      fadeIn: options?.fadeIn ?? false,
+      fadeOut: options?.fadeOut ?? false,
     } satisfies PlaybackTarget
+  }
+
+  function getManualFadeControls(timeline: PreparedTimeline | TimelineState) {
+    return {
+      fadeIn: timeline.manualFadeInEnabled,
+      fadeOut: timeline.manualFadeOutEnabled,
+    } satisfies FadeControls
+  }
+
+  function createManualPlaybackTarget(
+    timeline: PreparedTimeline,
+    section: AudioSection
+  ) {
+    return createPlaybackTarget(timeline, section, null, getManualFadeControls(timeline))
+  }
+
+  function getCodePlaybackFadeControls(timelineId: string) {
+    return {
+      fadeIn:
+        (scheduledPlaybackRef.current?.timelineId === timelineId &&
+          scheduledPlaybackRef.current.fadeIn) ||
+        (manualDeferredTargetRef.current?.timelineId === timelineId &&
+          manualDeferredTargetRef.current.fadeIn) ||
+        false,
+      fadeOut:
+        (currentPlaybackRef.current?.timelineId === timelineId &&
+          currentPlaybackRef.current.fadeOut) ||
+        false,
+    } satisfies FadeControls
   }
 
   function getCodeTargetFromStatus(
@@ -427,18 +560,134 @@ export default function Home() {
       field === "current" ? status.currentSection : status.nextSection
     const stateName =
       field === "current" ? status.currentStateName : status.nextStateName
+    const instructionIndex =
+      field === "current"
+        ? status.currentInstructionIndex
+        : status.nextInstructionIndex
 
-    if (sectionNumber === null || stateName === null) {
+    if (
+      sectionNumber === null ||
+      stateName === null ||
+      instructionIndex === null ||
+      !timeline.compiledProgram
+    ) {
       return null
     }
 
     const section = timeline.sections[sectionNumber - 1] ?? null
+    const instruction =
+      timeline.compiledProgram.states[stateName]?.instructions[instructionIndex] ?? null
 
-    if (!section) {
+    if (!section || !instruction || instruction.section !== sectionNumber) {
       return null
     }
 
-    return createPlaybackTarget(timeline, section, stateName)
+    return createPlaybackTarget(timeline, section, stateName, {
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })
+  }
+
+  function clearQueuedFadeInOverlay() {
+    safeStopOverlay(queuedFadeInOverlayRef.current)
+    queuedFadeInOverlayRef.current = null
+  }
+
+  function stopAllAudioOverlays() {
+    clearQueuedFadeInOverlay()
+    currentFadeOutOverlayRef.current = null
+
+    for (const overlay of Array.from(liveAudioOverlaysRef.current)) {
+      safeStopOverlay(overlay)
+    }
+  }
+
+  function scheduleCurrentFadeOutOverlay(
+    audioContext: AudioContext,
+    currentItem: ScheduledPlaybackItem
+  ) {
+    safeStopOverlay(currentFadeOutOverlayRef.current)
+    currentFadeOutOverlayRef.current = null
+    const crossfadeDurationSec = currentItem.crossfadeDurationSec
+
+    if (!currentItem.fadeOut || crossfadeDurationSec <= 0) {
+      return
+    }
+
+    const timeline = getPreparedTimelineById(currentItem.timelineId)
+
+    if (!timeline?.audioBuffer) {
+      return
+    }
+
+    if (
+      currentItem.section.endSec + crossfadeDurationSec >
+      timeline.audioBuffer.duration + CROSSFADE_EDGE_EPSILON_SEC
+    ) {
+      return
+    }
+
+    const boundaryTime = currentItem.startTime + getSectionLength(currentItem.section)
+    const overlay = createOverlayHandle(
+      audioContext,
+      timeline.audioBuffer,
+      liveAudioOverlaysRef.current
+    )
+
+    overlay.gainNode.gain.setValueAtTime(1, boundaryTime)
+    overlay.gainNode.gain.linearRampToValueAtTime(
+      0,
+      boundaryTime + crossfadeDurationSec
+    )
+    overlay.source.start(
+      boundaryTime,
+      currentItem.section.endSec,
+      crossfadeDurationSec
+    )
+
+    currentFadeOutOverlayRef.current = overlay
+  }
+
+  function scheduleQueuedFadeInOverlay(
+    audioContext: AudioContext,
+    queuedItem: ScheduledPlaybackItem,
+    audioBuffer: AudioBuffer
+  ) {
+    clearQueuedFadeInOverlay()
+    const crossfadeDurationSec = queuedItem.crossfadeDurationSec
+
+    if (!queuedItem.fadeIn || crossfadeDurationSec <= 0) {
+      return
+    }
+
+    if (
+      queuedItem.section.startSec <
+      crossfadeDurationSec - CROSSFADE_EDGE_EPSILON_SEC
+    ) {
+      return
+    }
+
+    const fadeStartTime = queuedItem.startTime - crossfadeDurationSec
+
+    if (fadeStartTime <= audioContext.currentTime + SCHEDULING_LEEWAY_SEC) {
+      return
+    }
+
+    const overlay = createOverlayHandle(
+      audioContext,
+      audioBuffer,
+      liveAudioOverlaysRef.current
+    )
+
+    overlay.gainNode.gain.setValueAtTime(0, fadeStartTime)
+    overlay.gainNode.gain.linearRampToValueAtTime(1, queuedItem.startTime)
+    overlay.source.start(
+      fadeStartTime,
+      queuedItem.section.startSec - crossfadeDurationSec,
+      crossfadeDurationSec
+    )
+
+    queuedFadeInOverlayRef.current = overlay
   }
 
   async function ensureAudioContext({ resume = true }: { resume?: boolean } = {}) {
@@ -564,6 +813,10 @@ export default function Home() {
         fileName: file.name,
         fileType: file.type,
         fileLastModified: file.lastModified,
+        bpmInput: "",
+        crossfadeDurationInput: DEFAULT_CROSSFADE_DURATION_INPUT,
+        manualFadeInEnabled: false,
+        manualFadeOutEnabled: false,
         trimInput: "0",
         dslInput: "",
       }
@@ -580,13 +833,6 @@ export default function Home() {
       ...timelineEntries.map((entry) => entry.placeholder),
     ])
 
-    if (!bpmIsValid) {
-      window.requestAnimationFrame(() => {
-        bpmInputRef.current?.focus()
-        bpmInputRef.current?.select()
-      })
-    }
-
     for (const entry of timelineEntries) {
       await hydrateTimelineFromBlob(entry.metadata, entry.file, { persistFile: true })
     }
@@ -602,11 +848,12 @@ export default function Home() {
     const audioContext = await ensureAudioContext()
     const boundaryTime = currentItem.startTime + getSectionLength(currentItem.section)
 
-    if (nextTarget && boundaryTime <= audioContext.currentTime + 0.03) {
+    if (nextTarget && boundaryTime <= audioContext.currentTime + SCHEDULING_LEEWAY_SEC) {
       return false
     }
 
     if (!nextTarget) {
+      clearQueuedFadeInOverlay()
       safeStopSource(scheduledSourceRef.current)
       scheduledSourceRef.current = null
       scheduledPlaybackRef.current = null
@@ -635,9 +882,11 @@ export default function Home() {
       getSectionLength(nextTarget.section)
     )
 
+    clearQueuedFadeInOverlay()
     safeStopSource(scheduledSourceRef.current)
     scheduledSourceRef.current = queuedSource
     scheduledPlaybackRef.current = queuedItem
+    scheduleQueuedFadeInOverlay(audioContext, queuedItem, nextTimeline.audioBuffer)
     updatePendingSelection(getTargetSelection(queuedItem))
 
     return true
@@ -655,6 +904,8 @@ export default function Home() {
     scheduledSourceRef.current = null
     currentPlaybackRef.current = null
     scheduledPlaybackRef.current = null
+    currentFadeOutOverlayRef.current = null
+    queuedFadeInOverlayRef.current = null
 
     if (!nextCurrentItem || !nextCurrentSource) {
       currentSourceRef.current = null
@@ -671,6 +922,7 @@ export default function Home() {
 
     currentSourceRef.current = nextCurrentSource
     currentPlaybackRef.current = nextCurrentItem
+    scheduleCurrentFadeOutOverlay(audioContextRef.current!, nextCurrentItem)
     updateActiveSelection(getTargetSelection(nextCurrentItem))
     setActiveSectionProgress(0)
 
@@ -695,6 +947,9 @@ export default function Home() {
           timelineId: nextCurrentItem.timelineId,
           section: nextCurrentItem.section,
           stateName: null,
+          crossfadeDurationSec: nextCurrentItem.crossfadeDurationSec,
+          fadeIn: false,
+          fadeOut: false,
         } satisfies PlaybackTarget)
       setCodeRuntimeStatusValue(null)
     } else if (playbackModeRef.current === "code") {
@@ -763,6 +1018,7 @@ export default function Home() {
     const nextToken = playbackTokenRef.current + 1
     playbackTokenRef.current = nextToken
 
+    stopAllAudioOverlays()
     safeStopSource(scheduledSourceRef.current)
     safeStopSource(currentSourceRef.current)
 
@@ -793,6 +1049,7 @@ export default function Home() {
 
     currentSourceRef.current = currentSource
     currentPlaybackRef.current = nextCurrentItem
+    scheduleCurrentFadeOutOverlay(audioContext, nextCurrentItem)
     codeNavigatorRef.current = mode === "code" ? navigator : null
     setPlaybackModeValue(mode)
     setCodeRuntimeStatusValue(mode === "code" ? status : null)
@@ -813,12 +1070,15 @@ export default function Home() {
 
   stopPlaybackRef.current = (clearActive = true) => {
     playbackTokenRef.current += 1
+    stopAllAudioOverlays()
     safeStopSource(scheduledSourceRef.current)
     safeStopSource(currentSourceRef.current)
     currentSourceRef.current = null
     scheduledSourceRef.current = null
     currentPlaybackRef.current = null
     scheduledPlaybackRef.current = null
+    currentFadeOutOverlayRef.current = null
+    queuedFadeInOverlayRef.current = null
     codeNavigatorRef.current = null
     manualDeferredTargetRef.current = null
     updatePendingSelection(null)
@@ -836,7 +1096,7 @@ export default function Home() {
     timeline: PreparedTimeline,
     section: AudioSection
   ) {
-    const target = createPlaybackTarget(timeline, section, null)
+    const target = createManualPlaybackTarget(timeline, section)
 
     await beginPlaybackSequence({
       timeline,
@@ -859,7 +1119,7 @@ export default function Home() {
       return
     }
 
-    const target = createPlaybackTarget(timeline, section, null)
+    const target = createManualPlaybackTarget(timeline, section)
     const queued = await scheduleQueuedPlayback(currentItem, target)
 
     if (!queued) {
@@ -1008,7 +1268,7 @@ export default function Home() {
   async function handleRunCode(timeline: PreparedTimeline) {
     const compileResult = compileMusicDsl(timeline.dslInput, {
       file: timeline.fileName,
-      bpm: bpmIsValid ? bpmValue : 0,
+      bpm: timeline.bpmIsValid ? timeline.bpmValue : 0,
       beatsPerSection: 16,
       sectionCount: timeline.sections.length,
     })
@@ -1173,6 +1433,105 @@ export default function Home() {
     }
 
     setSelectedTimelineId(nextTimelineId)
+  }
+
+  function handleTimelineBpmInputChange(timelineId: string, bpmInput: string) {
+    setTimelines((currentTimelines) =>
+      currentTimelines.map((timeline) =>
+        timeline.id === timelineId ? { ...timeline, bpmInput } : timeline
+      )
+    )
+
+    if (
+      activeSelection?.timelineId === timelineId ||
+      pendingSelection?.timelineId === timelineId
+    ) {
+      stopPlaybackRef.current()
+    }
+  }
+
+  function handleCrossfadeDurationInputChange(
+    timelineId: string,
+    crossfadeDurationInput: string
+  ) {
+    setTimelines((currentTimelines) =>
+      currentTimelines.map((timeline) =>
+        timeline.id === timelineId
+          ? { ...timeline, crossfadeDurationInput }
+          : timeline
+      )
+    )
+
+    if (
+      activeSelection?.timelineId === timelineId ||
+      pendingSelection?.timelineId === timelineId
+    ) {
+      stopPlaybackRef.current()
+    }
+  }
+
+  function handleTimelineFadeToggle(
+    timeline: PreparedTimeline,
+    field: keyof FadeControls
+  ) {
+    const currentFadeControls = getManualFadeControls(timeline)
+    const nextFadeControls = {
+      ...currentFadeControls,
+      [field]: !currentFadeControls[field],
+    } satisfies FadeControls
+
+    setTimelines((currentTimelines) =>
+      currentTimelines.map((timelineState) =>
+        timelineState.id === timeline.id
+          ? {
+              ...timelineState,
+              manualFadeInEnabled: nextFadeControls.fadeIn,
+              manualFadeOutEnabled: nextFadeControls.fadeOut,
+            }
+          : timelineState
+      )
+    )
+
+    if (playbackModeRef.current !== "manual") {
+      return
+    }
+
+    const audioContext = audioContextRef.current
+
+    if (currentPlaybackRef.current?.timelineId === timeline.id) {
+      currentPlaybackRef.current = {
+        ...currentPlaybackRef.current,
+        ...nextFadeControls,
+      }
+
+      if (audioContext) {
+        scheduleCurrentFadeOutOverlay(audioContext, currentPlaybackRef.current)
+      }
+    }
+
+    if (scheduledPlaybackRef.current?.timelineId === timeline.id) {
+      scheduledPlaybackRef.current = {
+        ...scheduledPlaybackRef.current,
+        ...nextFadeControls,
+      }
+
+      const preparedTimeline = getPreparedTimelineById(timeline.id)
+
+      if (audioContext && preparedTimeline?.audioBuffer) {
+        scheduleQueuedFadeInOverlay(
+          audioContext,
+          scheduledPlaybackRef.current,
+          preparedTimeline.audioBuffer
+        )
+      }
+    }
+
+    if (manualDeferredTargetRef.current?.timelineId === timeline.id) {
+      manualDeferredTargetRef.current = {
+        ...manualDeferredTargetRef.current,
+        ...nextFadeControls,
+      }
+    }
   }
 
   function handleTrimInputChange(timelineId: string, trimInput: string) {
@@ -1381,7 +1740,6 @@ export default function Home() {
         ? persistedState.timelineViewMode
         : "compact-timeline"
 
-      setBpmInput(persistedState.bpmInput)
       setTimelineViewMode(restoredViewMode)
       setTimelines(
         persistedState.timelines.map((metadata) => createTimelinePlaceholder(metadata))
@@ -1429,7 +1787,6 @@ export default function Home() {
 
       persistenceReadyRef.current = true
       savePersistedAppState({
-        bpmInput: persistedState.bpmInput,
         timelineViewMode: restoredViewMode,
         timelines: restoredMetadata,
       })
@@ -1458,7 +1815,6 @@ export default function Home() {
 
     try {
       savePersistedAppState({
-        bpmInput,
         timelineViewMode,
         timelines: timelines.map(
           ({
@@ -1466,6 +1822,10 @@ export default function Home() {
             fileName,
             fileType,
             fileLastModified,
+            bpmInput,
+            crossfadeDurationInput,
+            manualFadeInEnabled,
+            manualFadeOutEnabled,
             trimInput,
             dslInput,
           }) => ({
@@ -1473,6 +1833,10 @@ export default function Home() {
             fileName,
             fileType,
             fileLastModified,
+            bpmInput,
+            crossfadeDurationInput,
+            manualFadeInEnabled,
+            manualFadeOutEnabled,
             trimInput,
             dslInput,
           })
@@ -1485,7 +1849,7 @@ export default function Home() {
           : "Unable to save timeline settings locally."
       )
     }
-  }, [bpmInput, timelineViewMode, timelines])
+  }, [timelineViewMode, timelines])
 
   useEffect(() => {
     function handleWindowKeyDown(event: KeyboardEvent) {
@@ -1525,6 +1889,13 @@ export default function Home() {
   const selectedTimelineStateOptions = selectedTimeline
     ? getStateOptions(selectedTimeline)
     : []
+  const selectedTimelineFadeControlMode =
+    playbackMode === "code" ? "readonly" : "editable"
+  const selectedTimelineFadeControls = selectedTimeline
+    ? selectedTimelineFadeControlMode === "readonly"
+      ? getCodePlaybackFadeControls(selectedTimeline.id)
+      : getManualFadeControls(selectedTimeline)
+    : getDefaultFadeControls()
   const selectedTimelineActiveCodeState =
     selectedTimeline &&
     playbackMode === "code" &&
@@ -1538,12 +1909,51 @@ export default function Home() {
       ? (codeRuntimeStatus?.pendingTargetStateName ?? null)
       : null
 
+  function renderTimelineFadeToggle(
+    field: keyof FadeControls,
+    label: string
+  ) {
+    if (!selectedTimeline) {
+      return null
+    }
+
+    const isOn = selectedTimelineFadeControls[field]
+    const isEditable = selectedTimelineFadeControlMode === "editable"
+
+    return (
+      <button
+        aria-label={
+          isEditable
+            ? `${isOn ? "Disable" : "Enable"} ${label.toLowerCase()} for free play`
+            : `${label} ${isOn ? "enabled" : "disabled"}`
+        }
+        aria-pressed={isOn}
+        className={cn(
+          "inline-flex h-8 items-center rounded-full border px-3 text-xs font-medium uppercase tracking-[0.16em] transition-colors",
+          isOn
+            ? "border-emerald-300/70 bg-emerald-400/18 text-emerald-50"
+            : "border-border/60 bg-black/20 text-foreground/72",
+          isEditable
+            ? "cursor-pointer hover:border-foreground/40 hover:bg-black/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/45"
+            : "cursor-default"
+        )}
+        disabled={!isEditable}
+        onClick={() => {
+          handleTimelineFadeToggle(selectedTimeline, field)
+        }}
+        type="button"
+      >
+        {label}
+      </button>
+    )
+  }
+
   return (
     <>
       <Head>
         <title>Unshuffle Music</title>
         <meta
-          content="Drop one or more tracks, set a shared BPM, then loop 16-beat sections across multiple timelines."
+          content="Drop one or more tracks, set BPM and crossfade per track, then loop 16-beat sections across multiple timelines."
           name="description"
         />
       </Head>
@@ -1577,99 +1987,44 @@ export default function Home() {
                   </Badge>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Drop audio anywhere, set one BPM, and drive playback with manual
-                  section picks or the music DSL.
+                  Drop audio anywhere, set BPM per track, and drive playback with
+                  manual section picks or the music DSL.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 self-start sm:self-center">
+              <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
                 <p className="text-sm text-muted-foreground">
                   {timelines.length > 0
                     ? "Drop more audio anywhere to add tracks."
                     : "Drop audio anywhere to start."}
                 </p>
-
-                <Popover>
-                  <PopoverTrigger asChild>
+                <div className="flex items-center gap-1 rounded-lg bg-muted/30 p-1">
+                  {viewOptions.map((option) => (
                     <Button
-                      aria-label="Open shared loop settings"
-                      size="icon-sm"
-                      title="Shared loop settings"
+                      aria-label={option.label}
+                      className="flex-1"
+                      key={option.value}
+                      onClick={() => setTimelineViewMode(option.value)}
+                      size="sm"
+                      title={option.label}
                       type="button"
-                      variant="ghost"
+                      variant={
+                        timelineViewMode === option.value ? "secondary" : "ghost"
+                      }
                     >
-                      <HugeiconsIcon icon={Settings01Icon} size={16} />
+                      <HugeiconsIcon
+                        data-icon="inline-start"
+                        icon={option.icon}
+                        size={14}
+                      />
+                      <span>
+                        {option.label === "Compact timeline"
+                          ? "Timeline"
+                          : option.label}
+                      </span>
                     </Button>
-                  </PopoverTrigger>
-                  <PopoverContent align="end" className="w-64 p-3">
-                    <div className="flex flex-col gap-3">
-                      <p className="text-sm font-semibold tracking-tight">
-                        Shared settings
-                      </p>
-
-                      <FieldGroup className="gap-3">
-                        <Field
-                          className="max-w-xs"
-                          data-invalid={bpmInput !== "" && !bpmIsValid}
-                        >
-                          <FieldLabel htmlFor="bpm-input">BPM</FieldLabel>
-                          <Input
-                            aria-invalid={bpmInput !== "" && !bpmIsValid}
-                            id="bpm-input"
-                            inputMode="decimal"
-                            onChange={(event) => {
-                              stopPlaybackRef.current()
-                              setBpmInput(event.target.value)
-                            }}
-                            placeholder="128"
-                            ref={bpmInputRef}
-                            step="0.01"
-                            type="number"
-                            value={bpmInput}
-                          />
-                          <FieldDescription>
-                            {loopDurationSec
-                              ? `${formatDuration(loopDurationSec)} per section`
-                              : "Enter a positive BPM"}
-                          </FieldDescription>
-                        </Field>
-
-                        <Field>
-                          <FieldLabel>View</FieldLabel>
-                          <div className="flex items-center gap-1 rounded-lg bg-muted/30 p-1">
-                            {viewOptions.map((option) => (
-                              <Button
-                                aria-label={option.label}
-                                className="flex-1"
-                                key={option.value}
-                                onClick={() => setTimelineViewMode(option.value)}
-                                size="sm"
-                                title={option.label}
-                                type="button"
-                                variant={
-                                  timelineViewMode === option.value
-                                    ? "secondary"
-                                    : "ghost"
-                                }
-                              >
-                                <HugeiconsIcon
-                                  data-icon="inline-start"
-                                  icon={option.icon}
-                                  size={14}
-                                />
-                                <span>
-                                  {option.label === "Compact timeline"
-                                    ? "Timeline"
-                                    : option.label}
-                                </span>
-                              </Button>
-                            ))}
-                          </div>
-                        </Field>
-                      </FieldGroup>
-                    </div>
-                  </PopoverContent>
-                </Popover>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -1723,6 +2078,113 @@ export default function Home() {
                         aria-label={`Open settings for ${selectedTimeline.fileName}`}
                         size="icon-sm"
                         title={`Settings for ${selectedTimeline.fileName}`}
+                        type="button"
+                        variant="ghost"
+                      >
+                        <HugeiconsIcon icon={Settings01Icon} size={16} />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" className="w-72 p-3">
+                      <div className="flex flex-col gap-3">
+                        <p className="truncate text-sm font-semibold tracking-tight">
+                          {selectedTimeline.fileName}
+                        </p>
+
+                        <FieldGroup className="gap-3">
+                          <Field
+                            className="max-w-xs"
+                            data-invalid={
+                              selectedTimeline.bpmInput !== "" &&
+                              !selectedTimeline.bpmIsValid
+                            }
+                          >
+                            <FieldLabel htmlFor={`bpm-input-${selectedTimeline.id}`}>
+                              BPM
+                            </FieldLabel>
+                            <Input
+                              aria-invalid={
+                                selectedTimeline.bpmInput !== "" &&
+                                !selectedTimeline.bpmIsValid
+                              }
+                              id={`bpm-input-${selectedTimeline.id}`}
+                              inputMode="decimal"
+                              onChange={(event) => {
+                                handleTimelineBpmInputChange(
+                                  selectedTimeline.id,
+                                  event.target.value
+                                )
+                              }}
+                              placeholder="128"
+                              step="0.01"
+                              type="number"
+                              value={selectedTimeline.bpmInput}
+                            />
+                            <FieldDescription>
+                              {selectedTimeline.loopDurationSec
+                                ? `${formatDuration(
+                                    selectedTimeline.loopDurationSec
+                                  )} per 16-beat section`
+                                : "Enter a positive BPM for this track."}
+                            </FieldDescription>
+                          </Field>
+
+                          <Field
+                            className="max-w-xs"
+                            data-invalid={
+                              selectedTimeline.crossfadeDurationInput !== "" &&
+                              !selectedTimeline.crossfadeDurationIsValid
+                            }
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <FieldLabel
+                                htmlFor={`crossfade-duration-${selectedTimeline.id}`}
+                              >
+                                Crossfade
+                              </FieldLabel>
+                              <span className="text-xs text-muted-foreground">
+                                ms
+                              </span>
+                            </div>
+                            <Input
+                              aria-invalid={
+                                selectedTimeline.crossfadeDurationInput !== "" &&
+                                !selectedTimeline.crossfadeDurationIsValid
+                              }
+                              id={`crossfade-duration-${selectedTimeline.id}`}
+                              inputMode="decimal"
+                              min="0"
+                              onChange={(event) => {
+                                handleCrossfadeDurationInputChange(
+                                  selectedTimeline.id,
+                                  event.target.value
+                                )
+                              }}
+                              placeholder={DEFAULT_CROSSFADE_DURATION_INPUT}
+                              step="1"
+                              type="number"
+                              value={selectedTimeline.crossfadeDurationInput}
+                            />
+                            <FieldDescription>
+                              {!selectedTimeline.crossfadeDurationIsValid
+                                ? "Enter 0 or a positive duration."
+                                : selectedTimeline.crossfadeDurationSec === 0
+                                  ? "0 ms disables crossfade overlays for this track."
+                                  : `${formatMilliseconds(
+                                      selectedTimeline.crossfadeDurationValueMs
+                                    )} fade-in and fade-out overlays.`}
+                            </FieldDescription>
+                          </Field>
+                        </FieldGroup>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        aria-label={`Open trim settings for ${selectedTimeline.fileName}`}
+                        size="icon-sm"
+                        title={`Trim settings for ${selectedTimeline.fileName}`}
                         type="button"
                         variant="ghost"
                       >
@@ -1822,6 +2284,16 @@ export default function Home() {
                       {selectedTimeline.errorMessage}
                     </div>
                   ) : null}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {renderTimelineFadeToggle("fadeIn", "Fade in")}
+                    {renderTimelineFadeToggle("fadeOut", "Fade out")}
+                    <span className="text-xs text-muted-foreground">
+                      {selectedTimelineFadeControlMode === "editable"
+                        ? "Applies to free play on this track."
+                        : "Showing fade flags from the current DSL transition."}
+                    </span>
+                  </div>
 
                   <AudioWaveform
                     activeSectionId={

@@ -1,19 +1,28 @@
+import { CROSSFADE_DURATION_SEC } from "./audio";
+
 const APP_STATE_STORAGE_KEY = "unshuffle-music-state-v1";
 const DATABASE_NAME = "unshuffle-music";
 const DATABASE_VERSION = 1;
 const TIMELINE_FILE_STORE = "timeline-files";
+
+const DEFAULT_CROSSFADE_DURATION_INPUT = String(
+  Math.round(CROSSFADE_DURATION_SEC * 1000),
+);
 
 export type PersistedTimelineMetadata = {
   id: string;
   fileName: string;
   fileType: string;
   fileLastModified: number;
+  bpmInput: string;
+  crossfadeDurationInput: string;
+  manualFadeInEnabled: boolean;
+  manualFadeOutEnabled: boolean;
   trimInput: string;
   dslInput: string;
 };
 
 export type PersistedAppState = {
-  bpmInput: string;
   timelineViewMode: string;
   timelines: PersistedTimelineMetadata[];
 };
@@ -37,6 +46,14 @@ function isPersistedTimelineMetadata(
     typeof candidate.fileName === "string" &&
     typeof candidate.fileType === "string" &&
     typeof candidate.fileLastModified === "number" &&
+    (typeof candidate.bpmInput === "string" ||
+      typeof candidate.bpmInput === "undefined") &&
+    (typeof candidate.crossfadeDurationInput === "string" ||
+      typeof candidate.crossfadeDurationInput === "undefined") &&
+    (typeof candidate.manualFadeInEnabled === "boolean" ||
+      typeof candidate.manualFadeInEnabled === "undefined") &&
+    (typeof candidate.manualFadeOutEnabled === "boolean" ||
+      typeof candidate.manualFadeOutEnabled === "undefined") &&
     typeof candidate.trimInput === "string" &&
     (typeof candidate.dslInput === "string" ||
       typeof candidate.dslInput === "undefined")
@@ -81,11 +98,13 @@ export function loadPersistedAppState() {
   }
 
   try {
-    const parsedState = JSON.parse(rawState) as Partial<PersistedAppState>;
+    const parsedState = JSON.parse(rawState) as Partial<PersistedAppState> & {
+      bpmInput?: unknown;
+    };
+    const legacyBpmInput =
+      typeof parsedState.bpmInput === "string" ? parsedState.bpmInput : "";
 
     return {
-      bpmInput:
-        typeof parsedState.bpmInput === "string" ? parsedState.bpmInput : "",
       timelineViewMode:
         typeof parsedState.timelineViewMode === "string"
           ? parsedState.timelineViewMode
@@ -95,6 +114,12 @@ export function loadPersistedAppState() {
             .filter(isPersistedTimelineMetadata)
             .map((timeline) => ({
               ...timeline,
+              bpmInput: timeline.bpmInput ?? legacyBpmInput,
+              crossfadeDurationInput:
+                timeline.crossfadeDurationInput ??
+                DEFAULT_CROSSFADE_DURATION_INPUT,
+              manualFadeInEnabled: timeline.manualFadeInEnabled ?? false,
+              manualFadeOutEnabled: timeline.manualFadeOutEnabled ?? false,
               dslInput: timeline.dslInput ?? "",
             }))
         : [],

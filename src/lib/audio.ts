@@ -8,6 +8,8 @@ export type AudioSection = {
   endMs: number;
 };
 
+export const CROSSFADE_DURATION_SEC = 0.2;
+
 const EPSILON = 0.0001;
 
 export function getSectionDurationSec(bpm: number, beatsPerSection = 16) {

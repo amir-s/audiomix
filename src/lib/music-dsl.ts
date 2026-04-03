@@ -21,6 +21,8 @@ export type CompiledInstruction = {
   entryLabel: string | null;
   exitLabel: string | null;
   loopTo: number | null;
+  fadeIn: boolean;
+  fadeOut: boolean;
   line: number;
   column: number;
 };
@@ -47,8 +49,10 @@ export type MusicDslCompileResult = {
 export type NavigatorStatus = {
   currentStateName: string | null;
   currentSection: number | null;
+  currentInstructionIndex: number | null;
   nextStateName: string | null;
   nextSection: number | null;
+  nextInstructionIndex: number | null;
   pendingTargetStateName: string | null;
   nextComesFromPendingTransition: boolean;
 };
@@ -68,6 +72,8 @@ type ParsedSectionElement = {
   entryLabel: string | null;
   exitLabel: string | null;
   repeat: boolean;
+  fadeIn: boolean;
+  fadeOut: boolean;
   line: number;
   column: number;
 };
@@ -76,6 +82,8 @@ type ParsedGroupElement = {
   kind: "group";
   elements: ParsedElement[];
   repeat: boolean;
+  fadeIn: boolean;
+  fadeOut: boolean;
   line: number;
   column: number;
 };
@@ -213,9 +221,18 @@ class LineParser {
     const entryLabel = this.peek() === "{" ? this.parseLabel("entry") : null;
 
     this.skipWhitespace();
+    const fadeInColumn = this.getColumn();
+    const fadeIn = this.consume("!");
+
+    this.skipWhitespace();
 
     if (this.isAtEnd()) {
-      if (entryLabel !== null) {
+      if (fadeIn) {
+        this.pushError(
+          "Crossfade modifiers must be attached to a section or group.",
+          fadeInColumn,
+        );
+      } else if (entryLabel !== null) {
         this.pushError(
           "Entry labels must be attached to a section.",
           startColumn,
@@ -230,6 +247,7 @@ class LineParser {
       return null;
     }
 
+    const fadeOut = this.consume("!");
     const exitLabel = this.peek() === "{" ? this.parseLabel("exit") : null;
     const repeat = this.consume("+");
 
@@ -250,6 +268,8 @@ class LineParser {
 
       return {
         ...atom,
+        fadeIn,
+        fadeOut,
         repeat,
       };
     }
@@ -258,13 +278,18 @@ class LineParser {
       ...atom,
       entryLabel,
       exitLabel,
+      fadeIn,
+      fadeOut,
       repeat,
     };
   }
 
   private parseAtom():
-    | Omit<ParsedSectionElement, "entryLabel" | "exitLabel" | "repeat">
-    | Omit<ParsedGroupElement, "repeat">
+    | Omit<
+        ParsedSectionElement,
+        "entryLabel" | "exitLabel" | "repeat" | "fadeIn" | "fadeOut"
+      >
+    | Omit<ParsedGroupElement, "repeat" | "fadeIn" | "fadeOut">
     | null {
     const column = this.getColumn();
     const next = this.peek();
@@ -455,6 +480,8 @@ function flattenElements(
   diagnostics: MusicDslDiagnostic[],
   stateName: string,
   sectionCount: number,
+  inheritedFadeIn = false,
+  inheritedFadeOut = false,
 ) {
   for (const element of elements) {
     if (element.kind === "section") {
@@ -479,6 +506,8 @@ function flattenElements(
         entryLabel: element.entryLabel,
         exitLabel: element.exitLabel,
         loopTo: element.repeat ? position : null,
+        fadeIn: inheritedFadeIn || element.fadeIn,
+        fadeOut: inheritedFadeOut || element.fadeOut,
         line: element.line,
         column: element.column,
       });
@@ -492,6 +521,8 @@ function flattenElements(
       diagnostics,
       stateName,
       sectionCount,
+      inheritedFadeIn || element.fadeIn,
+      inheritedFadeOut || element.fadeOut,
     );
 
     if (element.repeat && instructions.length > groupStart) {
@@ -890,8 +921,10 @@ export function createNavigator(program: CompiledMusicProgram): Navigator {
       return {
         currentStateName,
         currentSection: getCurrentInstruction()?.section ?? null,
+        currentInstructionIndex: cursor,
         nextStateName: next?.stateName ?? null,
         nextSection: next?.section ?? null,
+        nextInstructionIndex: next?.index ?? null,
         pendingTargetStateName,
         nextComesFromPendingTransition: resolveTransition() !== null,
       };
