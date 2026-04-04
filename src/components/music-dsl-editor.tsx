@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react"
+import type { CSSProperties, ComponentProps, KeyboardEventHandler } from "react"
 
 import Editor from "react-simple-code-editor"
 import Prism from "prismjs"
@@ -32,10 +32,13 @@ const editorStyle = {
   lineHeight: 1.5,
 } satisfies CSSProperties
 
+type EditorOnKeyDown = ComponentProps<typeof Editor>["onKeyDown"]
+
 type MusicDslEditorProps = {
   className?: string
   id: string
   onChange: (value: string) => void
+  onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement>
   placeholder?: string
   value: string
 }
@@ -44,6 +47,7 @@ export function MusicDslEditor({
   className,
   id,
   onChange,
+  onKeyDown,
   placeholder,
   value,
 }: MusicDslEditorProps) {
@@ -56,6 +60,7 @@ export function MusicDslEditor({
       highlight={(code) =>
         Prism.highlight(code, Prism.languages[MUSIC_DSL_LANGUAGE], MUSIC_DSL_LANGUAGE)
       }
+      onKeyDown={onKeyDown as EditorOnKeyDown}
       onValueChange={onChange}
       padding={12}
       placeholder={placeholder}

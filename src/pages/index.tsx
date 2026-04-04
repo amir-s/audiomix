@@ -4,6 +4,7 @@ import {
   useEffectEvent,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react"
 import Head from "next/head"
 import { HugeiconsIcon } from "@hugeicons/react"
@@ -1358,6 +1359,23 @@ export default function Home() {
     }
   }
 
+  function handleDslEditorKeyDown(
+    event: ReactKeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (
+      event.key !== "Enter" ||
+      event.nativeEvent.isComposing ||
+      event.altKey ||
+      (!event.metaKey && !event.ctrlKey) ||
+      !selectedTimeline
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    void handleRunCode(selectedTimeline)
+  }
+
   async function handlePlayCodeState(
     timeline: PreparedTimeline,
     stateName: string
@@ -2388,6 +2406,7 @@ export default function Home() {
                         onChange={(dslInput) => {
                           handleDslInputChange(selectedTimeline.id, dslInput)
                         }}
+                        onKeyDown={handleDslEditorKeyDown}
                         placeholder={`explore: 1{a} (2 3)*3\ncombat: {a}!4 (5 6)+`}
                         value={selectedTimeline.dslInput}
                       />
