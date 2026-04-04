@@ -1,10 +1,22 @@
-import { type RefCallback, useEffect, useRef, useState } from "react"
+import { type RefCallback } from "react"
 
 import { Button } from "@/components/ui/button"
 import { type CompiledState } from "@/lib/music-dsl"
 import { cn } from "@/lib/utils"
 
 import { InstructionNode } from "./instruction-node"
+
+type LoopRange = { from: number; to: number }
+
+function getLoopRanges(state: CompiledState): LoopRange[] {
+  const ranges: LoopRange[] = []
+  for (const instr of state.instructions) {
+    if (instr.loopTo !== null) {
+      ranges.push({ from: instr.loopTo, to: instr.position })
+    }
+  }
+  return ranges
+}
 
 type StateRowProps = {
   state: CompiledState
@@ -15,40 +27,6 @@ type StateRowProps = {
   registerBadgeRef: (key: string) => RefCallback<HTMLElement>
 }
 
-type LoopPathData = { d: string; endX: number; endY: number }
-
-function measureLoopPaths(
-  state: CompiledState,
-  rowEl: HTMLElement,
-  nodeEls: Map<number, HTMLElement | null>
-): LoopPathData[] {
-  const rowRect = rowEl.getBoundingClientRect()
-  const paths: LoopPathData[] = []
-
-  for (const instr of state.instructions) {
-    if (instr.loopTo === null) continue
-
-    const fromEl = nodeEls.get(instr.position)
-    const toEl = nodeEls.get(instr.loopTo)
-    if (!fromEl || !toEl) continue
-
-    const fromRect = fromEl.getBoundingClientRect()
-    const toRect = toEl.getBoundingClientRect()
-
-    const fromX = fromRect.left + fromRect.width / 2 - rowRect.left
-    const toX = toRect.left + toRect.width / 2 - rowRect.left
-    const baseY = 0
-    const spanPx = Math.abs(fromX - toX)
-    const arcHeight = Math.min(24, 10 + spanPx * 0.06)
-
-    const d = `M ${fromX} ${baseY} C ${fromX} ${baseY + arcHeight}, ${toX} ${baseY + arcHeight}, ${toX} ${baseY}`
-
-    paths.push({ d, endX: toX, endY: baseY })
-  }
-
-  return paths
-}
-
 export function StateRow({
   state,
   isActive,
@@ -57,27 +35,51 @@ export function StateRow({
   onStateClick,
   registerBadgeRef,
 }: StateRowProps) {
-  const nodeRefs = useRef<Map<number, HTMLElement | null>>(new Map())
-  const rowRef = useRef<HTMLDivElement | null>(null)
-  const [loopPaths, setLoopPaths] = useState<LoopPathData[]>([])
+  const loopRanges = getLoopRanges(state)
 
-  const hasLoops = state.instructions.some((i) => i.loopTo !== null)
+  // Build segments: groups of instructions, some wrapped in a loop box
+  type Segment =
+    | { type: "single"; instr: (typeof state.instructions)[number] }
+    | { type: "loop"; instrs: (typeof state.instructions)[number][] }
 
-  useEffect(() => {
-    if (!hasLoops) return
-
-    const update = () => {
-      if (!rowRef.current) return
-      setLoopPaths(measureLoopPaths(state, rowRef.current, nodeRefs.current))
+  const segments: Segment[] = []
+  let i = 0
+  while (i < state.instructions.length) {
+    const instr = state.instructions[i]
+    const loop = loopRanges.find((r) => r.from === instr.position)
+    if (loop) {
+      const loopInstrs: (typeof state.instructions)[number][] = []
+      while (i < state.instructions.length && state.instructions[i].position <= loop.to) {
+        loopInstrs.push(state.instructions[i])
+        i++
+      }
+      segments.push({ type: "loop", instrs: loopInstrs })
+    } else {
+      segments.push({ type: "single", instr })
+      i++
     }
+  }
 
-    const raf = requestAnimationFrame(update)
-    window.addEventListener("resize", update)
-    return () => {
-      cancelAnimationFrame(raf)
-      window.removeEventListener("resize", update)
-    }
-  }, [hasLoops, state])
+  function renderNode(instr: (typeof state.instructions)[number]) {
+    return (
+      <div key={instr.position}>
+        <InstructionNode
+          instruction={instr}
+          isActive={isActive && activeInstructionIndex === instr.position}
+          entryBadgeRef={
+            instr.entryLabel
+              ? registerBadgeRef(`${state.name}:${instr.position}:entry`)
+              : undefined
+          }
+          exitBadgeRef={
+            instr.exitLabel
+              ? registerBadgeRef(`${state.name}:${instr.position}:exit`)
+              : undefined
+          }
+        />
+      </div>
+    )
+  }
 
   return (
     <div
@@ -104,61 +106,20 @@ export function StateRow({
         {state.name}
       </Button>
 
-      <div className="relative flex flex-col">
-        <div ref={rowRef} className="flex items-start gap-1.5">
-          {state.instructions.map((instr) => (
+      <div className="flex items-start gap-1.5">
+        {segments.map((seg) => {
+          if (seg.type === "single") {
+            return renderNode(seg.instr)
+          }
+          return (
             <div
-              key={instr.position}
-              ref={(el) => {
-                nodeRefs.current.set(instr.position, el)
-              }}
+              key={`loop-${seg.instrs[0].position}`}
+              className="flex items-start gap-1.5 rounded-lg border border-dashed border-muted-foreground/25 bg-muted/10 px-1.5 py-1.5"
             >
-              <InstructionNode
-                instruction={instr}
-                isActive={isActive && activeInstructionIndex === instr.position}
-                entryBadgeRef={
-                  instr.entryLabel
-                    ? registerBadgeRef(`${state.name}:${instr.position}:entry`)
-                    : undefined
-                }
-                exitBadgeRef={
-                  instr.exitLabel
-                    ? registerBadgeRef(`${state.name}:${instr.position}:exit`)
-                    : undefined
-                }
-              />
+              {seg.instrs.map(renderNode)}
             </div>
-          ))}
-        </div>
-
-        {loopPaths.length > 0 && (
-          <svg
-            aria-hidden="true"
-            className="pointer-events-none w-full"
-            style={{ height: 28, marginTop: -2 }}
-          >
-            {loopPaths.map((path, i) => (
-              <path
-                key={i}
-                d={path.d}
-                fill="none"
-                stroke="currentColor"
-                strokeDasharray="4 3"
-                strokeLinecap="round"
-                strokeWidth={1.5}
-                className="text-muted-foreground/50"
-              />
-            ))}
-            {loopPaths.map((path, i) => (
-              <polygon
-                key={`arrow-${i}`}
-                points={`${path.endX},${path.endY} ${path.endX - 3},${path.endY + 6} ${path.endX + 3},${path.endY + 6}`}
-                fill="currentColor"
-                className="text-muted-foreground/50"
-              />
-            ))}
-          </svg>
-        )}
+          )
+        })}
       </div>
     </div>
   )

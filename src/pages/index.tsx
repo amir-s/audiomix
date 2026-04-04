@@ -1259,6 +1259,16 @@ export default function Home() {
     }
   }
 
+  function isTextEntryTarget(target: EventTarget | null) {
+    return (
+      target instanceof HTMLElement &&
+      (target.isContentEditable ||
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT")
+    )
+  }
+
   const handleSpacebarToggle = useEffectEvent((event: KeyboardEvent) => {
     if (
       event.code !== "Space" ||
@@ -1277,13 +1287,7 @@ export default function Home() {
     const isButtonTarget =
       target instanceof HTMLElement && target.closest("button") !== null
 
-    if (
-      target instanceof HTMLElement &&
-      (target.isContentEditable ||
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT")
-    ) {
+    if (isTextEntryTarget(target)) {
       return
     }
 
@@ -1297,6 +1301,36 @@ export default function Home() {
 
     event.preventDefault()
     void togglePlaybackPause()
+  })
+
+  const handleFreePlayFadeHotkeys = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.repeat ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.shiftKey ||
+      playbackModeRef.current === "code" ||
+      !selectedTimeline ||
+      isTextEntryTarget(event.target)
+    ) {
+      return
+    }
+
+    let fadeField: keyof FadeControls | null = null
+
+    if (event.code === "Digit1" || event.code === "Numpad1") {
+      fadeField = "fadeIn"
+    } else if (event.code === "Digit2" || event.code === "Numpad2") {
+      fadeField = "fadeOut"
+    }
+
+    if (fadeField === null) {
+      return
+    }
+
+    event.preventDefault()
+    handleTimelineFadeToggle(selectedTimeline, fadeField)
   })
 
   async function handleSectionSelect(
@@ -1951,6 +1985,7 @@ export default function Home() {
 
   useEffect(() => {
     function handleWindowKeyDown(event: KeyboardEvent) {
+      handleFreePlayFadeHotkeys(event)
       handleSpacebarToggle(event)
     }
 

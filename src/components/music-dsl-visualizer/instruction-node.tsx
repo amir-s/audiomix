@@ -26,6 +26,14 @@ export function InstructionNode({
           ? "border-emerald-400/70 bg-emerald-400/15 ring-2 ring-emerald-400/40"
           : "border-border/60 bg-muted/20"
       )}
+      style={
+        isActive
+          ? undefined
+          : {
+              ...(instruction.fadeIn ? { borderLeftColor: "rgb(52 211 153 / 0.8)" } : {}),
+              ...(instruction.fadeOut ? { borderRightColor: "rgb(251 191 36 / 0.8)" } : {}),
+            }
+      }
     >
       {instruction.entryLabel ? (
         <span
@@ -61,20 +69,18 @@ export function InstructionNode({
         <span className="h-[16px]" />
       )}
 
-      {(instruction.fadeIn || instruction.fadeOut) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-          {instruction.fadeIn && (
-            <span className="text-emerald-400" title="Fade in">
-              &#x25B2;in
-            </span>
-          )}
-          {instruction.fadeOut && (
-            <span className="text-amber-400" title="Fade out">
-              out&#x25BC;
-            </span>
-          )}
-        </div>
-      )}
+      <div className="flex h-[14px] items-center gap-1.5 text-[10px]">
+        {instruction.fadeIn && (
+          <span className="text-emerald-400" title="Fade in">
+            &gt;in
+          </span>
+        )}
+        {instruction.fadeOut && (
+          <span className="text-amber-400" title="Fade out">
+            out&gt;
+          </span>
+        )}
+      </div>
     </div>
   )
 }
