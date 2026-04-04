@@ -9,16 +9,19 @@ import Head from "next/head"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
   Delete01Icon,
+  FlowIcon,
   LayoutGridIcon,
   MoreHorizontalIcon,
   PauseIcon,
   PlayIcon,
   Settings01Icon,
+  SourceCodeIcon,
   ViewAgendaIcon,
 } from "@hugeicons/core-free-icons"
 
 import { AudioWaveform, TimelineViewMode } from "@/components/audio-waveform"
 import { MusicDslEditor } from "@/components/music-dsl-editor"
+import { MusicDslVisualizer } from "@/components/music-dsl-visualizer"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -397,6 +400,7 @@ export default function Home() {
   const [selectedTimelineId, setSelectedTimelineId] = useState<string | null>(null)
   const [timelineViewMode, setTimelineViewMode] =
     useState<TimelineViewMode>("compact-timeline")
+  const [dslViewMode, setDslViewMode] = useState<"code" | "visual">("code")
   const [isPlaybackPaused, setIsPlaybackPaused] = useState(false)
   const [activeSectionProgress, setActiveSectionProgress] = useState(0)
   const [activeSelection, setActiveSelection] = useState<TimelineSelection | null>(
@@ -2366,9 +2370,37 @@ export default function Home() {
                   <FieldGroup className="gap-3">
                     <Field>
                       <div className="flex items-center justify-between gap-2">
-                        <FieldLabel htmlFor={`dsl-input-${selectedTimeline.id}`}>
-                          Music DSL
-                        </FieldLabel>
+                        <div className="flex items-center gap-2">
+                          <FieldLabel htmlFor={`dsl-input-${selectedTimeline.id}`}>
+                            Music DSL
+                          </FieldLabel>
+                          <div className="flex items-center gap-1 rounded-lg bg-muted/30 p-1">
+                            <Button
+                              aria-label="Code view"
+                              className="flex-1"
+                              onClick={() => setDslViewMode("code")}
+                              size="sm"
+                              title="Code view"
+                              type="button"
+                              variant={dslViewMode === "code" ? "secondary" : "ghost"}
+                            >
+                              <HugeiconsIcon data-icon="inline-start" icon={SourceCodeIcon} size={14} />
+                              <span>Code</span>
+                            </Button>
+                            <Button
+                              aria-label="Visual view"
+                              className="flex-1"
+                              onClick={() => setDslViewMode("visual")}
+                              size="sm"
+                              title="Visual view"
+                              type="button"
+                              variant={dslViewMode === "visual" ? "secondary" : "ghost"}
+                            >
+                              <HugeiconsIcon data-icon="inline-start" icon={FlowIcon} size={14} />
+                              <span>Visual</span>
+                            </Button>
+                          </div>
+                        </div>
                         <Badge
                           variant={
                             selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty
@@ -2383,25 +2415,45 @@ export default function Home() {
                               : "Uncompiled"}
                         </Badge>
                       </div>
-                      <MusicDslEditor
-                        id={`dsl-input-${selectedTimeline.id}`}
-                        onChange={(dslInput) => {
-                          handleDslInputChange(selectedTimeline.id, dslInput)
-                        }}
-                        placeholder={`explore: 1{a} (2 3)*3\ncombat: {a}!4 (5 6)+`}
-                        value={selectedTimeline.dslInput}
-                      />
-                      <FieldDescription>
-                        {selectedTimeline.codeIsDirty
-                          ? "The editor has changes that have not been compiled against the current sections."
-                          : selectedTimeline.compiledProgram
-                            ? `Compiled ${getStateOptions(selectedTimeline).length.toString()} state${
-                                getStateOptions(selectedTimeline).length === 1
-                                  ? ""
-                                  : "s"
-                              } for this track.`
-                            : "Run the code to validate it and enter code mode."}
-                      </FieldDescription>
+                      {dslViewMode === "code" ? (
+                        <>
+                          <MusicDslEditor
+                            id={`dsl-input-${selectedTimeline.id}`}
+                            onChange={(dslInput) => {
+                              handleDslInputChange(selectedTimeline.id, dslInput)
+                            }}
+                            placeholder={`explore: 1{a} (2 3)*3\ncombat: {a}!4 (5 6)+`}
+                            value={selectedTimeline.dslInput}
+                          />
+                          <FieldDescription>
+                            {selectedTimeline.codeIsDirty
+                              ? "The editor has changes that have not been compiled against the current sections."
+                              : selectedTimeline.compiledProgram
+                                ? `Compiled ${getStateOptions(selectedTimeline).length.toString()} state${
+                                    getStateOptions(selectedTimeline).length === 1
+                                      ? ""
+                                      : "s"
+                                  } for this track.`
+                                : "Run the code to validate it and enter code mode."}
+                          </FieldDescription>
+                        </>
+                      ) : selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty ? (
+                        <MusicDslVisualizer
+                          program={selectedTimeline.compiledProgram}
+                          activeStateName={selectedTimelineActiveCodeState}
+                          activeInstructionIndex={codeRuntimeStatus?.currentInstructionIndex ?? null}
+                          pendingStateName={selectedTimelinePendingCodeState}
+                          onStateClick={(name, opts) =>
+                            handleCodeStateButtonPress(selectedTimeline, name, opts)
+                          }
+                        />
+                      ) : (
+                        <div className="flex min-h-40 items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/10 text-sm text-muted-foreground">
+                          {selectedTimeline.codeIsDirty
+                            ? "Compile the DSL to see the visual view."
+                            : "No compiled program. Write some DSL and run it."}
+                        </div>
+                      )}
                     </Field>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -2444,7 +2496,7 @@ export default function Home() {
                       </Popover>
                     </div>
 
-                    {selectedTimelineStateOptions.length > 0 ? (
+                    {selectedTimelineStateOptions.length > 0 && !(dslViewMode === "visual" && selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty) ? (
                       <div className="flex flex-col gap-2">
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
                           {selectedTimelineStateOptions.map((stateName) => {
