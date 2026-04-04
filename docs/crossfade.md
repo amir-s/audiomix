@@ -89,7 +89,7 @@ Section 5:    ░▒▓█|██████████████  (head fad
 
 ### Combined (`2!` transitioning to `!5`)
 
-When both sides of a transition have crossfade, the effects are independent:
+When both sides of a transition have crossfade, the effects are independent unless runtime suppresses them for an adjacent continuation:
 
 ```
 Time:    ... ─────|─────────────── ...
@@ -103,9 +103,21 @@ At the boundary: section 5 at full volume + section 2's tail fading out.
 
 Three audio sources may briefly overlap in the 200ms window around the boundary.
 
+### Adjacent Continuation (`7!` transitioning to `!8`)
+
+When the queued section starts exactly where the current section ends on the **same timeline**, runtime suppresses both overlay sources for that boundary.
+
+This is a runtime-only rule:
+
+- The compiled instruction data still keeps `fadeIn` and `fadeOut`.
+- The UI can still show the fade markers from the compiled program.
+- Only the audio engine skips creating the fade overlays for the `7 -> 8` continuation.
+
+This makes adjacent slices behave like a direct continuation instead of briefly layering the tail of section 7 or the head of section 8 over audio that is already contiguous in the buffer.
+
 ### Self-Repeat (`2!+`)
 
-When section 2 loops back to itself, the crossfade still applies. The tail of the previous play fades out while the next play starts at full volume. The `!` modifier does not special-case self-transitions.
+When section 2 loops back to itself, the crossfade still applies. The tail of the previous play fades out while the next play starts at full volume. Self-repeat is **not** treated as an adjacent continuation because the next section does not begin at the current section's end offset.
 
 ## Duration
 
@@ -121,6 +133,16 @@ If a section is at the boundary of the audio buffer and there isn't 200ms of aud
 - **Pre-crossfade on the first section**: No head audio exists before the buffer start. The crossfade is silently skipped (no-op).
 
 In both cases, the main section plays normally with no error or warning.
+
+### Smart Runtime Suppression
+
+If a queued transition is replaced mid-play with a non-adjacent target, runtime uses the fade flags normally.
+
+For example:
+
+- `7! 8`: if section 8 is the next queued section, the fade-out of 7 is suppressed.
+- `7! 8`: if a later `goTo()` changes the actual next section to 10 before the boundary, the fade-out of 7 is scheduled again.
+- `7 !8`: if section 8 is the next queued section, the fade-in of 8 is suppressed.
 
 ## Compiled Representation
 

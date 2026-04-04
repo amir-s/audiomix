@@ -55,6 +55,7 @@ import {
   formatMilliseconds,
   getSectionDurationSec,
 } from "@/lib/audio"
+import { getRuntimeCrossfadeOverlayPlan } from "@/lib/crossfade-runtime"
 import {
   compileMusicDsl,
   createNavigator,
@@ -617,9 +618,14 @@ export default function Home() {
     queuedFadeInOverlayRef.current = null
   }
 
+  function clearCurrentFadeOutOverlay() {
+    safeStopOverlay(currentFadeOutOverlayRef.current)
+    currentFadeOutOverlayRef.current = null
+  }
+
   function stopAllAudioOverlays() {
     clearQueuedFadeInOverlay()
-    currentFadeOutOverlayRef.current = null
+    clearCurrentFadeOutOverlay()
 
     for (const overlay of Array.from(liveAudioOverlaysRef.current)) {
       safeStopOverlay(overlay)
@@ -628,13 +634,12 @@ export default function Home() {
 
   function scheduleCurrentFadeOutOverlay(
     audioContext: AudioContext,
-    currentItem: ScheduledPlaybackItem
+    currentItem: ScheduledPlaybackItem,
+    fadeOutEnabled = currentItem.fadeOut
   ) {
-    safeStopOverlay(currentFadeOutOverlayRef.current)
-    currentFadeOutOverlayRef.current = null
     const crossfadeDurationSec = currentItem.crossfadeDurationSec
 
-    if (!currentItem.fadeOut || crossfadeDurationSec <= 0) {
+    if (!fadeOutEnabled || crossfadeDurationSec <= 0) {
       return
     }
 
@@ -675,12 +680,12 @@ export default function Home() {
   function scheduleQueuedFadeInOverlay(
     audioContext: AudioContext,
     queuedItem: ScheduledPlaybackItem,
-    audioBuffer: AudioBuffer
+    audioBuffer: AudioBuffer,
+    fadeInEnabled = queuedItem.fadeIn
   ) {
-    clearQueuedFadeInOverlay()
     const crossfadeDurationSec = queuedItem.crossfadeDurationSec
 
-    if (!queuedItem.fadeIn || crossfadeDurationSec <= 0) {
+    if (!fadeInEnabled || crossfadeDurationSec <= 0) {
       return
     }
 
@@ -712,6 +717,48 @@ export default function Home() {
     )
 
     queuedFadeInOverlayRef.current = overlay
+  }
+
+  function refreshCrossfadeOverlays(
+    audioContext: AudioContext,
+    currentItem: ScheduledPlaybackItem | null,
+    queuedItem: ScheduledPlaybackItem | null
+  ) {
+    clearCurrentFadeOutOverlay()
+    clearQueuedFadeInOverlay()
+
+    if (!currentItem) {
+      return
+    }
+
+    const overlayPlan = getRuntimeCrossfadeOverlayPlan({
+      current: currentItem,
+      next: queuedItem,
+      edgeEpsilonSec: CROSSFADE_EDGE_EPSILON_SEC,
+    })
+
+    scheduleCurrentFadeOutOverlay(
+      audioContext,
+      currentItem,
+      overlayPlan.currentFadeOut
+    )
+
+    if (!queuedItem) {
+      return
+    }
+
+    const queuedTimeline = getPreparedTimelineById(queuedItem.timelineId)
+
+    if (!queuedTimeline?.audioBuffer) {
+      return
+    }
+
+    scheduleQueuedFadeInOverlay(
+      audioContext,
+      queuedItem,
+      queuedTimeline.audioBuffer,
+      overlayPlan.nextFadeIn
+    )
   }
 
   async function ensureAudioContext({ resume = true }: { resume?: boolean } = {}) {
@@ -877,10 +924,10 @@ export default function Home() {
     }
 
     if (!nextTarget) {
-      clearQueuedFadeInOverlay()
       safeStopSource(scheduledSourceRef.current)
       scheduledSourceRef.current = null
       scheduledPlaybackRef.current = null
+      refreshCrossfadeOverlays(audioContext, currentItem, null)
       updatePendingSelection(null)
       return true
     }
@@ -906,11 +953,10 @@ export default function Home() {
       getSectionLength(nextTarget.section)
     )
 
-    clearQueuedFadeInOverlay()
     safeStopSource(scheduledSourceRef.current)
     scheduledSourceRef.current = queuedSource
     scheduledPlaybackRef.current = queuedItem
-    scheduleQueuedFadeInOverlay(audioContext, queuedItem, nextTimeline.audioBuffer)
+    refreshCrossfadeOverlays(audioContext, currentItem, queuedItem)
     updatePendingSelection(getTargetSelection(queuedItem))
 
     return true
@@ -946,7 +992,6 @@ export default function Home() {
 
     currentSourceRef.current = nextCurrentSource
     currentPlaybackRef.current = nextCurrentItem
-    scheduleCurrentFadeOutOverlay(audioContextRef.current!, nextCurrentItem)
     updateActiveSelection(getTargetSelection(nextCurrentItem))
     setActiveSectionProgress(0)
 
@@ -1078,7 +1123,6 @@ export default function Home() {
 
     currentSourceRef.current = currentSource
     currentPlaybackRef.current = nextCurrentItem
-    scheduleCurrentFadeOutOverlay(audioContext, nextCurrentItem)
     codeNavigatorRef.current = mode === "code" ? navigator : null
     setPlaybackModeValue(mode)
     setCodeRuntimeStatusValue(mode === "code" ? status : null)
@@ -1559,26 +1603,12 @@ export default function Home() {
         ...currentPlaybackRef.current,
         ...nextFadeControls,
       }
-
-      if (audioContext) {
-        scheduleCurrentFadeOutOverlay(audioContext, currentPlaybackRef.current)
-      }
     }
 
     if (scheduledPlaybackRef.current?.timelineId === timeline.id) {
       scheduledPlaybackRef.current = {
         ...scheduledPlaybackRef.current,
         ...nextFadeControls,
-      }
-
-      const preparedTimeline = getPreparedTimelineById(timeline.id)
-
-      if (audioContext && preparedTimeline?.audioBuffer) {
-        scheduleQueuedFadeInOverlay(
-          audioContext,
-          scheduledPlaybackRef.current,
-          preparedTimeline.audioBuffer
-        )
       }
     }
 
@@ -1587,6 +1617,18 @@ export default function Home() {
         ...manualDeferredTargetRef.current,
         ...nextFadeControls,
       }
+    }
+
+    if (
+      audioContext &&
+      (currentPlaybackRef.current?.timelineId === timeline.id ||
+        scheduledPlaybackRef.current?.timelineId === timeline.id)
+    ) {
+      refreshCrossfadeOverlays(
+        audioContext,
+        currentPlaybackRef.current,
+        scheduledPlaybackRef.current
+      )
     }
   }
 

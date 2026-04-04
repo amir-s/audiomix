@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test src/lib/music-dsl.test.ts"
+    "test": "node --test src/lib/*.test.ts"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.1.1",
