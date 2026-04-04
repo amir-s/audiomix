@@ -2388,7 +2388,7 @@ export default function Home() {
                         onChange={(dslInput) => {
                           handleDslInputChange(selectedTimeline.id, dslInput)
                         }}
-                        placeholder={`explore: 1{a} (2 3)+\ncombat: {a}4 (5 6)+`}
+                        placeholder={`explore: 1{a} (2 3)*3\ncombat: {a}!4 (5 6)+`}
                         value={selectedTimeline.dslInput}
                       />
                       <FieldDescription>

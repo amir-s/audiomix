@@ -57,6 +57,16 @@ Groups are structural — they define a unit that repetition operators and label
 
 ### Repetition
 
+The DSL supports both finite and infinite repetition.
+
+The `*N` suffix means "play this section or group exactly `N` times total":
+
+```
+build: 1 (2 3)*3
+```
+
+This plays: `1 → 2 → 3 → 2 → 3 → 2 → 3`
+
 The `+` operator means "loop this section or group forever":
 
 ```
@@ -73,9 +83,12 @@ ambient: 1+
 
 This loops section 1 forever: `1 → 1 → 1 → ...`
 
-Only two repetition modes exist:
+Repetition modes:
 - **Bare** (no operator): play exactly once.
+- **`*N`**: play exactly `N` total times, where `N` is a positive integer.
 - **`+`**: loop forever.
+
+Counted repetition stays in the same modifier slot as `+`, so examples like `!1!*3` and `1{a}*3` are valid. For counted sections, the entry label is attached only to the first generated copy, while the exit label is attached to every generated copy.
 
 ### Entry Labels
 
@@ -154,6 +167,8 @@ Compiles to:
 | 2        | 6       | `a`         | `b`        | → 1          |
 
 The "Loop Back To" field is set on the last node of a `+` group, pointing back to the first node of that group.
+
+Counted repetition is compiled away before runtime. For example, `1*3` compiles to three sequential instruction rows for section `1`, while `1+` compiles to a single instruction row whose loop pointer targets itself.
 
 ### Cursor Movement
 
@@ -395,14 +410,15 @@ program     = state+
 state       = stateName ":" pattern NEWLINE
 stateName   = [a-zA-Z_][a-zA-Z0-9_]*
 pattern     = element+
-element     = (entryLabel? atom exitLabel?) repetition?
+element     = entryLabel? "!"? atom "!"? exitLabel? repetition?
 atom        = section | group
 group       = "(" element+ ")"
 section     = [1-9][0-9]*
 entryLabel  = "{" labelName "}"
 exitLabel   = "{" labelName "}"
 labelName   = [a-zA-Z][a-zA-Z0-9]*
-repetition  = "+"
+repetition  = "+" | "*" count
+count       = [1-9][0-9]*
 ```
 
 ## Complete Example

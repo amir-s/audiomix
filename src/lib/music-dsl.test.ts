@@ -73,6 +73,29 @@ test("flattens nested groups and applies loop-back pointers to repeated groups",
   assert.equal(result.program.states.main.exhausts, false);
 });
 
+test("expands counted section repetition into sequential instructions", () => {
+  const program = compileProgram("main: 1*10");
+
+  assert.equal(program.states.main.instructions.length, 10);
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      loopTo: instruction.loopTo,
+    })),
+    Array.from({ length: 10 }, () => ({ section: 1, loopTo: null })),
+  );
+  assert.equal(program.states.main.exhausts, true);
+});
+
+test("expands counted groups in place", () => {
+  const program = compileProgram("main: 1 (2 3)*3");
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => instruction.section),
+    [1, 2, 3, 2, 3, 2, 3],
+  );
+});
+
 test("buffers transitions until the current section can resolve them", () => {
   const program = compileProgram(`
 intro: 1 2{a}
@@ -152,6 +175,30 @@ beta: {a}4+
   assert.equal(navigator.getStatus().currentStateName, "beta");
 });
 
+test("transitions can resolve from counted copies that carry exit labels", () => {
+  const program = compileProgram(`
+main: {a}1{b}*3 2+
+target: {b}3+
+`);
+  const navigator = createNavigator(program);
+
+  navigator.start("main");
+  navigator.tick();
+
+  assert.equal(navigator.current(), 1);
+  assert.equal(navigator.getStatus().currentInstructionIndex, 1);
+
+  navigator.goTo("target");
+
+  assert.equal(navigator.next(), 3);
+  assert.equal(navigator.getStatus().nextComesFromPendingTransition, true);
+
+  navigator.tick();
+
+  assert.equal(navigator.current(), 3);
+  assert.equal(navigator.getStatus().currentStateName, "target");
+});
+
 test("compiles section crossfade modifiers with labels and repeats", () => {
   const program = compileProgram(`
 main: 1 2! !3 !4! 5!{a}+ {b}!6 {c}!7!{d}+
@@ -225,6 +272,45 @@ main: 1 2! !3 !4! 5!{a}+ {b}!6 {c}!7!{d}+
       },
     ],
   );
+});
+
+test("expands counted section modifiers onto every generated copy", () => {
+  const program = compileProgram(`
+main: !1!*3
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })),
+    [
+      { section: 1, fadeIn: true, fadeOut: true },
+      { section: 1, fadeIn: true, fadeOut: true },
+      { section: 1, fadeIn: true, fadeOut: true },
+    ],
+  );
+});
+
+test("keeps counted entry labels on the first copy and exit labels on every copy", () => {
+  const program = compileProgram(`
+main: {a}1{b}*3
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      entryLabel: instruction.entryLabel,
+      exitLabel: instruction.exitLabel,
+    })),
+    [
+      { section: 1, entryLabel: "a", exitLabel: "b" },
+      { section: 1, entryLabel: null, exitLabel: "b" },
+      { section: 1, entryLabel: null, exitLabel: "b" },
+    ],
+  );
+  assert.deepEqual(program.states.main.entryPoints, { a: 0 });
 });
 
 test("expands group crossfade modifiers onto descendant sections", () => {
@@ -373,6 +459,40 @@ entries: {a}1 {a}2
   assert.ok(
     result.diagnostics.some((diagnostic) =>
       diagnostic.message.includes("Duplicate entry label"),
+    ),
+  );
+});
+
+test("rejects invalid counted repetition syntax", () => {
+  const result = compileMusicDsl(
+    `
+zero: 1*0
+missing: 1*
+doubleA: 1*3+
+doubleB: 1+*3
+`,
+    {
+      file: "track.mp3",
+      bpm: 120,
+      sectionCount: 8,
+    },
+  );
+
+  assert.equal(result.program, null);
+  assert.equal(hasMusicDslErrors(result.diagnostics), true);
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes("positive integer"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes("positive repeat count"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes("cannot be combined"),
     ),
   );
 });

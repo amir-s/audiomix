@@ -66,12 +66,17 @@ export type Navigator = {
   getStatus(): NavigatorStatus;
 };
 
+type ParsedRepetition =
+  | { kind: "once" }
+  | { kind: "forever" }
+  | { kind: "count"; count: number };
+
 type ParsedSectionElement = {
   kind: "section";
   section: number;
   entryLabel: string | null;
   exitLabel: string | null;
-  repeat: boolean;
+  repetition: ParsedRepetition;
   fadeIn: boolean;
   fadeOut: boolean;
   line: number;
@@ -81,7 +86,7 @@ type ParsedSectionElement = {
 type ParsedGroupElement = {
   kind: "group";
   elements: ParsedElement[];
-  repeat: boolean;
+  repetition: ParsedRepetition;
   fadeIn: boolean;
   fadeOut: boolean;
   line: number;
@@ -249,7 +254,7 @@ class LineParser {
 
     const fadeOut = this.consume("!");
     const exitLabel = this.peek() === "{" ? this.parseLabel("exit") : null;
-    const repeat = this.consume("+");
+    const repetition = this.parseRepetition();
 
     if (atom.kind === "group") {
       if (entryLabel !== null) {
@@ -270,7 +275,7 @@ class LineParser {
         ...atom,
         fadeIn,
         fadeOut,
-        repeat,
+        repetition,
       };
     }
 
@@ -280,16 +285,16 @@ class LineParser {
       exitLabel,
       fadeIn,
       fadeOut,
-      repeat,
+      repetition,
     };
   }
 
   private parseAtom():
     | Omit<
         ParsedSectionElement,
-        "entryLabel" | "exitLabel" | "repeat" | "fadeIn" | "fadeOut"
+        "entryLabel" | "exitLabel" | "repetition" | "fadeIn" | "fadeOut"
       >
-    | Omit<ParsedGroupElement, "repeat" | "fadeIn" | "fadeOut">
+    | Omit<ParsedGroupElement, "repetition" | "fadeIn" | "fadeOut">
     | null {
     const column = this.getColumn();
     const next = this.peek();
@@ -340,6 +345,68 @@ class LineParser {
 
     this.pushError(`Unexpected token '${next}'.`, column);
     return null;
+  }
+
+  private parseRepetition(): ParsedRepetition {
+    if (this.consume("+")) {
+      this.consumeInvalidRepetitionSuffix();
+      return { kind: "forever" };
+    }
+
+    const starColumn = this.getColumn();
+
+    if (!this.consume("*")) {
+      return { kind: "once" };
+    }
+
+    const first = this.peek();
+
+    if (!first || !isDigit(first)) {
+      this.pushError("Expected a positive repeat count after '*'.", starColumn);
+      this.consumeInvalidRepetitionSuffix();
+      return { kind: "once" };
+    }
+
+    const countText = this.consumeWhile(isDigit);
+
+    if (countText.startsWith("0")) {
+      this.pushError(
+        "Counted repetition must use a positive integer.",
+        starColumn,
+      );
+      this.consumeInvalidRepetitionSuffix();
+      return { kind: "once" };
+    }
+
+    this.consumeInvalidRepetitionSuffix();
+
+    return {
+      kind: "count",
+      count: Number.parseInt(countText, 10),
+    };
+  }
+
+  private consumeInvalidRepetitionSuffix() {
+    const next = this.peek();
+
+    if (next !== "+" && next !== "*") {
+      return;
+    }
+
+    this.pushError(
+      "Repetition modifiers cannot be combined on the same element.",
+      this.getColumn(),
+    );
+
+    while (!this.isAtEnd()) {
+      const value = this.peek();
+
+      if (!value || (value !== "+" && value !== "*" && !isDigit(value))) {
+        return;
+      }
+
+      this.index += 1;
+    }
   }
 
   private parseIdentifier(context: string) {
@@ -482,10 +549,78 @@ function flattenElements(
   sectionCount: number,
   inheritedFadeIn = false,
   inheritedFadeOut = false,
+  reportDiagnostics = true,
 ) {
   for (const element of elements) {
-    if (element.kind === "section") {
-      if (element.section < 1 || element.section > sectionCount) {
+    flattenElement(
+      element,
+      instructions,
+      diagnostics,
+      stateName,
+      sectionCount,
+      inheritedFadeIn,
+      inheritedFadeOut,
+      true,
+      reportDiagnostics,
+    );
+  }
+}
+
+function flattenElement(
+  element: ParsedElement,
+  instructions: CompiledInstruction[],
+  diagnostics: MusicDslDiagnostic[],
+  stateName: string,
+  sectionCount: number,
+  inheritedFadeIn: boolean,
+  inheritedFadeOut: boolean,
+  includeEntryLabel: boolean,
+  reportDiagnostics: boolean,
+) {
+  if (element.repetition.kind === "count") {
+    for (let copyIndex = 0; copyIndex < element.repetition.count; copyIndex += 1) {
+      flattenElementOnce(
+        element,
+        instructions,
+        diagnostics,
+        stateName,
+        sectionCount,
+        inheritedFadeIn,
+        inheritedFadeOut,
+        includeEntryLabel && copyIndex === 0,
+        reportDiagnostics && copyIndex === 0,
+      );
+    }
+    return;
+  }
+
+  flattenElementOnce(
+    element,
+    instructions,
+    diagnostics,
+    stateName,
+    sectionCount,
+    inheritedFadeIn,
+    inheritedFadeOut,
+    includeEntryLabel,
+    reportDiagnostics,
+  );
+}
+
+function flattenElementOnce(
+  element: ParsedElement,
+  instructions: CompiledInstruction[],
+  diagnostics: MusicDslDiagnostic[],
+  stateName: string,
+  sectionCount: number,
+  inheritedFadeIn: boolean,
+  inheritedFadeOut: boolean,
+  includeEntryLabel: boolean,
+  reportDiagnostics: boolean,
+) {
+  if (element.kind === "section") {
+    if (element.section < 1 || element.section > sectionCount) {
+      if (reportDiagnostics) {
         diagnostics.push({
           severity: "error",
           message: `Section ${element.section.toString()} is out of range for this track; expected 1-${Math.max(
@@ -496,38 +631,42 @@ function flattenElements(
           column: element.column,
           stateName,
         });
-        continue;
       }
-
-      const position = instructions.length;
-      instructions.push({
-        position,
-        section: element.section,
-        entryLabel: element.entryLabel,
-        exitLabel: element.exitLabel,
-        loopTo: element.repeat ? position : null,
-        fadeIn: inheritedFadeIn || element.fadeIn,
-        fadeOut: inheritedFadeOut || element.fadeOut,
-        line: element.line,
-        column: element.column,
-      });
-      continue;
+      return;
     }
 
-    const groupStart = instructions.length;
-    flattenElements(
-      element.elements,
-      instructions,
-      diagnostics,
-      stateName,
-      sectionCount,
-      inheritedFadeIn || element.fadeIn,
-      inheritedFadeOut || element.fadeOut,
-    );
+    const position = instructions.length;
+    instructions.push({
+      position,
+      section: element.section,
+      entryLabel: includeEntryLabel ? element.entryLabel : null,
+      exitLabel: element.exitLabel,
+      loopTo: element.repetition.kind === "forever" ? position : null,
+      fadeIn: inheritedFadeIn || element.fadeIn,
+      fadeOut: inheritedFadeOut || element.fadeOut,
+      line: element.line,
+      column: element.column,
+    });
+    return;
+  }
 
-    if (element.repeat && instructions.length > groupStart) {
-      instructions[instructions.length - 1]!.loopTo = groupStart;
-    }
+  const groupStart = instructions.length;
+  flattenElements(
+    element.elements,
+    instructions,
+    diagnostics,
+    stateName,
+    sectionCount,
+    inheritedFadeIn || element.fadeIn,
+    inheritedFadeOut || element.fadeOut,
+    reportDiagnostics,
+  );
+
+  if (
+    element.repetition.kind === "forever" &&
+    instructions.length > groupStart
+  ) {
+    instructions[instructions.length - 1]!.loopTo = groupStart;
   }
 }
 

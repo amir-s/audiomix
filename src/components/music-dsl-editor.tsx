@@ -18,7 +18,7 @@ const musicDslGrammar: Prism.Grammar = {
     alias: "symbol",
   },
   number: /\b\d+\b/,
-  operator: /[+!]/,
+  operator: /[+*!]/,
   punctuation: /[():]/,
 }
 

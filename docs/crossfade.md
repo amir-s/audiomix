@@ -18,7 +18,7 @@ The `!` sits between entry/exit labels and the atom:
 element = entryLabel? "!"? atom "!"? exitLabel? repetition?
 ```
 
-Full ordering: `[entryLabel] [!] atom [!] [exitLabel] [+]`
+Full ordering: `[entryLabel] [!] atom [!] [exitLabel] [("+" | "*N")]`
 
 Examples:
 
@@ -26,9 +26,13 @@ Examples:
 2!          post-crossfade
 !5          pre-crossfade
 !5!         both
+!1!*3       both + counted repetition
 2!+         post-crossfade + repeat
+2!*4        post-crossfade + counted repetition
 !5+         pre-crossfade + repeat
+!5*2        pre-crossfade + counted repetition
 2!{a}+      post-crossfade + exit label + repeat
+2!{a}*3     post-crossfade + exit label + counted repetition
 {b}!5       entry label + pre-crossfade
 {b}!5!{a}+  entry label + pre-in + section + fade-out + exit label + repeat
 ```
@@ -41,6 +45,7 @@ When `!` is applied to a group, it expands to all sections within that group:
 (1 2 3)!    → (1! 2! 3!)
 !(1 2 3)    → (!1 !2 !3)
 !(1 2 3)!   → (!1! !2! !3!)
+!(1 2 3)!*2 → (!1! !2! !3! !1! !2! !3!)
 !(1 2 3)!+  → (!1! !2! !3!)+
 ```
 
@@ -191,7 +196,8 @@ section     = [1-9][0-9]*
 entryLabel  = "{" labelName "}"
 exitLabel   = "{" labelName "}"
 labelName   = [a-zA-Z][a-zA-Z0-9]*
-repetition  = "+"
+repetition  = "+" | "*" count
+count       = [1-9][0-9]*
 ```
 
 ## Examples
