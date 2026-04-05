@@ -1,7 +1,12 @@
 import { CROSSFADE_DURATION_SEC } from "./audio";
 
-const APP_STATE_STORAGE_KEY = "unshuffle-music-state-v1";
-const DATABASE_NAME = "unshuffle-music";
+const APP_STATE_STORAGE_KEY = "mixaudio-state-v1";
+const LEGACY_APP_STATE_STORAGE_KEYS = [
+  "audiomix-state-v1",
+  "unshuffle-music-state-v1",
+];
+const DATABASE_NAME = "mixaudio";
+const LEGACY_DATABASE_NAMES = ["audiomix", "unshuffle-music"];
 const DATABASE_VERSION = 1;
 const TIMELINE_FILE_STORE = "timeline-files";
 
@@ -60,13 +65,13 @@ function isPersistedTimelineMetadata(
   );
 }
 
-function openTimelineDatabase(): Promise<IDBDatabase> {
+function openTimelineDatabase(databaseName = DATABASE_NAME): Promise<IDBDatabase> {
   if (typeof window === "undefined" || !("indexedDB" in window)) {
     throw new Error("This browser cannot persist dropped files for refreshes.");
   }
 
   return new Promise((resolve, reject) => {
-    const request = window.indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const request = window.indexedDB.open(databaseName, DATABASE_VERSION);
 
     request.onupgradeneeded = () => {
       const database = request.result;
@@ -91,7 +96,12 @@ export function loadPersistedAppState() {
     return null;
   }
 
-  const rawState = window.localStorage.getItem(APP_STATE_STORAGE_KEY);
+  const rawState =
+    window.localStorage.getItem(APP_STATE_STORAGE_KEY) ??
+    LEGACY_APP_STATE_STORAGE_KEYS.map((key) => window.localStorage.getItem(key)).find(
+      (value) => value !== null,
+    ) ??
+    null;
 
   if (!rawState) {
     return null;
@@ -104,7 +114,7 @@ export function loadPersistedAppState() {
     const legacyBpmInput =
       typeof parsedState.bpmInput === "string" ? parsedState.bpmInput : "";
 
-    return {
+    const nextState = {
       timelineViewMode:
         typeof parsedState.timelineViewMode === "string"
           ? parsedState.timelineViewMode
@@ -124,6 +134,10 @@ export function loadPersistedAppState() {
             }))
         : [],
     } satisfies PersistedAppState;
+
+    window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(nextState));
+
+    return nextState;
   } catch {
     return null;
   }
@@ -138,7 +152,7 @@ export function savePersistedAppState(state: PersistedAppState) {
 }
 
 export async function saveTimelineFile(id: string, blob: Blob) {
-  const database = await openTimelineDatabase();
+  const database = await openTimelineDatabase(DATABASE_NAME);
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -169,10 +183,10 @@ export async function saveTimelineFile(id: string, blob: Blob) {
 }
 
 export async function loadTimelineFile(id: string) {
-  const database = await openTimelineDatabase();
+  const database = await openTimelineDatabase(DATABASE_NAME);
 
   try {
-    return await new Promise<Blob | null>((resolve, reject) => {
+    const storedBlob = await new Promise<Blob | null>((resolve, reject) => {
       const transaction = database.transaction(TIMELINE_FILE_STORE, "readonly");
       const request = transaction.objectStore(TIMELINE_FILE_STORE).get(id);
 
@@ -187,13 +201,54 @@ export async function loadTimelineFile(id: string) {
         resolve(record?.blob ?? null);
       };
     });
+
+    if (storedBlob) {
+      return storedBlob;
+    }
   } finally {
     database.close();
   }
+
+  for (const databaseName of LEGACY_DATABASE_NAMES) {
+    const legacyDatabase = await openTimelineDatabase(databaseName);
+
+    try {
+      const legacyBlob = await new Promise<Blob | null>((resolve, reject) => {
+        const transaction = legacyDatabase.transaction(
+          TIMELINE_FILE_STORE,
+          "readonly",
+        );
+        const request = transaction.objectStore(TIMELINE_FILE_STORE).get(id);
+
+        request.onerror = () => {
+          reject(
+            request.error ?? new Error("Unable to read the stored file."),
+          );
+        };
+
+        request.onsuccess = () => {
+          const record = request.result as StoredTimelineFileRecord | undefined;
+          resolve(record?.blob ?? null);
+        };
+      });
+
+      if (!legacyBlob) {
+        continue;
+      }
+
+      await saveTimelineFile(id, legacyBlob);
+
+      return legacyBlob;
+    } finally {
+      legacyDatabase.close();
+    }
+  }
+
+  return null;
 }
 
 export async function deleteTimelineFile(id: string) {
-  const database = await openTimelineDatabase();
+  const database = await openTimelineDatabase(DATABASE_NAME);
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -217,5 +272,33 @@ export async function deleteTimelineFile(id: string) {
     });
   } finally {
     database.close();
+  }
+
+  for (const databaseName of LEGACY_DATABASE_NAMES) {
+    const legacyDatabase = await openTimelineDatabase(databaseName);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = legacyDatabase.transaction(
+          TIMELINE_FILE_STORE,
+          "readwrite",
+        );
+
+        transaction.oncomplete = () => {
+          resolve();
+        };
+
+        transaction.onerror = () => {
+          reject(
+            transaction.error ??
+              new Error("Unable to remove the stored file from browser storage."),
+          );
+        };
+
+        transaction.objectStore(TIMELINE_FILE_STORE).delete(id);
+      });
+    } finally {
+      legacyDatabase.close();
+    }
   }
 }

@@ -47,6 +47,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
+  compileDsl,
+  createMixPlayer,
+  type MixPlayer,
+  type MixPlayerStatus,
+} from "@/index"
+import {
   AudioSection,
   CROSSFADE_DURATION_SEC,
   createAudioSections,
@@ -57,16 +63,12 @@ import {
 } from "@/lib/audio"
 import { getRuntimeCrossfadeOverlayPlan } from "@/lib/crossfade-runtime"
 import {
-  compileMusicDsl,
   connectMusicDslInstructions,
-  createNavigator,
   findCompiledInstructionByIdentity,
   type MusicDslEditResult,
   type CompiledMusicProgram,
   type MusicDslDiagnostic,
   type MusicDslInstructionIdentity,
-  type Navigator,
-  type NavigatorStatus,
   type SheetMetadata,
   toggleMusicDslInstructionFade,
 } from "@/lib/music-dsl"
@@ -389,6 +391,8 @@ function getMusicDslMetadata(timeline: PreparedTimeline): SheetMetadata {
     bpm: timeline.bpmIsValid ? timeline.bpmValue : 0,
     beatsPerSection: 16,
     sectionCount: timeline.sections.length,
+    trimMs: timeline.trimValue,
+    sourceId: timeline.fileName,
   }
 }
 
@@ -406,13 +410,14 @@ export default function Home() {
   const hydrateTimelineFromBlobRef =
     useRef<HydrateTimelineFromBlob>(async () => undefined)
   const timelineTaskTokensRef = useRef(new Map<string, number>())
+  const timelineSourceBlobsRef = useRef(new Map<string, Blob>())
   const taskCounterRef = useRef(0)
   const persistenceReadyRef = useRef(false)
   const stopPlaybackRef = useRef<(clearActive?: boolean) => void>(() => undefined)
   const playbackTokenRef = useRef(0)
   const playbackModeRef = useRef<PlaybackMode>("idle")
-  const codeNavigatorRef = useRef<Navigator | null>(null)
-  const codeRuntimeStatusRef = useRef<NavigatorStatus | null>(null)
+  const codePlayerRef = useRef<MixPlayer | null>(null)
+  const codeRuntimeStatusRef = useRef<MixPlayerStatus | null>(null)
   const preparedTimelinesRef = useRef<PreparedTimeline[]>([])
   const manualDeferredTargetRef = useRef<PlaybackTarget | null>(null)
 
@@ -432,7 +437,7 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("idle")
   const [codeRuntimeStatus, setCodeRuntimeStatus] =
-    useState<NavigatorStatus | null>(null)
+    useState<MixPlayerStatus | null>(null)
   const [selectedDslInstruction, setSelectedDslInstruction] =
     useState<DslVisualizerSelection | null>(null)
 
@@ -529,7 +534,7 @@ export default function Home() {
     setPlaybackMode(nextMode)
   }
 
-  function setCodeRuntimeStatusValue(nextStatus: NavigatorStatus | null) {
+  function setCodeRuntimeStatusValue(nextStatus: MixPlayerStatus | null) {
     codeRuntimeStatusRef.current = nextStatus
     setCodeRuntimeStatus(nextStatus)
   }
@@ -539,6 +544,63 @@ export default function Home() {
       preparedTimelinesRef.current.find((timeline) => timeline.id === timelineId) ??
       null
     )
+  }
+
+  function getTimelineSelectionBySectionNumber(
+    timelineId: string,
+    sectionNumber: number | null
+  ) {
+    if (sectionNumber === null) {
+      return null
+    }
+
+    const timeline = getPreparedTimelineById(timelineId)
+    const section = timeline?.sections[sectionNumber - 1] ?? null
+
+    if (!section) {
+      return null
+    }
+
+    return {
+      timelineId,
+      sectionId: section.id,
+    } satisfies TimelineSelection
+  }
+
+  function syncCodePlayerStatus(
+    timelineId: string,
+    nextStatus: MixPlayerStatus | null
+  ) {
+    setCodeRuntimeStatusValue(nextStatus)
+
+    if (!nextStatus || nextStatus.transportState === "idle") {
+      if (playbackModeRef.current === "code") {
+        setPlaybackModeValue("idle")
+      }
+
+      updateActiveSelection(null)
+      updatePendingSelection(null)
+      setIsPlaybackPaused(false)
+      setActiveSectionProgress(0)
+      return
+    }
+
+    setPlaybackModeValue("code")
+    setSelectedTimelineId(timelineId)
+    setIsPlaybackPaused(nextStatus.transportState === "paused")
+    updateActiveSelection(
+      getTimelineSelectionBySectionNumber(timelineId, nextStatus.currentSection)
+    )
+    updatePendingSelection(
+      getTimelineSelectionBySectionNumber(timelineId, nextStatus.nextSection)
+    )
+
+    if (nextStatus.currentStateName) {
+      updateTimeline(timelineId, (timelineState) => ({
+        ...timelineState,
+        lastActiveCodeState: nextStatus.currentStateName,
+      }))
+    }
   }
 
   function applyVisualizerEditResult(
@@ -739,53 +801,16 @@ export default function Home() {
   function getCodePlaybackFadeControls(timelineId: string) {
     return {
       fadeIn:
-        (scheduledPlaybackRef.current?.timelineId === timelineId &&
-          scheduledPlaybackRef.current.fadeIn) ||
-        (manualDeferredTargetRef.current?.timelineId === timelineId &&
-          manualDeferredTargetRef.current.fadeIn) ||
-        false,
+        playbackModeRef.current === "code" &&
+        activeSelection?.timelineId === timelineId
+          ? (codeRuntimeStatusRef.current?.nextFadeIn ?? false)
+          : false,
       fadeOut:
-        (currentPlaybackRef.current?.timelineId === timelineId &&
-          currentPlaybackRef.current.fadeOut) ||
-        false,
+        playbackModeRef.current === "code" &&
+        activeSelection?.timelineId === timelineId
+          ? (codeRuntimeStatusRef.current?.currentFadeOut ?? false)
+          : false,
     } satisfies FadeControls
-  }
-
-  function getCodeTargetFromStatus(
-    timeline: PreparedTimeline,
-    program: CompiledMusicProgram | null,
-    status: NavigatorStatus,
-    field: "current" | "next"
-  ) {
-    const sectionNumber =
-      field === "current" ? status.currentSection : status.nextSection
-    const stateName =
-      field === "current" ? status.currentStateName : status.nextStateName
-    const instructionIndex =
-      field === "current"
-        ? status.currentInstructionIndex
-        : status.nextInstructionIndex
-
-    if (
-      sectionNumber === null ||
-      stateName === null ||
-      instructionIndex === null ||
-      !program
-    ) {
-      return null
-    }
-
-    const section = timeline.sections[sectionNumber - 1] ?? null
-    const instruction = program.states[stateName]?.instructions[instructionIndex] ?? null
-
-    if (!section || !instruction || instruction.section !== sectionNumber) {
-      return null
-    }
-
-    return createPlaybackTarget(timeline, section, stateName, {
-      fadeIn: instruction.fadeIn,
-      fadeOut: instruction.fadeOut,
-    })
   }
 
   function clearQueuedFadeInOverlay() {
@@ -981,6 +1006,7 @@ export default function Home() {
     const taskToken = createTaskToken(metadata.id)
 
     try {
+      timelineSourceBlobsRef.current.set(metadata.id, blob)
       const { decodedBuffer, peaks } = await decodeTimelineBlob(blob)
 
       if (!isTaskCurrent(metadata.id, taskToken)) {
@@ -1034,6 +1060,22 @@ export default function Home() {
         timelineTaskTokensRef.current.delete(metadata.id)
       }
     }
+  }
+
+  async function getTimelineSourceBlob(timelineId: string) {
+    const storedBlob = timelineSourceBlobsRef.current.get(timelineId)
+
+    if (storedBlob) {
+      return storedBlob
+    }
+
+    const loadedBlob = await loadTimelineFile(timelineId)
+
+    if (loadedBlob) {
+      timelineSourceBlobsRef.current.set(timelineId, loadedBlob)
+    }
+
+    return loadedBlob
   }
 
   async function addFiles(files: File[]) {
@@ -1156,7 +1198,6 @@ export default function Home() {
       currentSourceRef.current = null
       currentPlaybackRef.current = null
       manualDeferredTargetRef.current = null
-      codeNavigatorRef.current = null
       updatePendingSelection(null)
       updateActiveSelection(null)
       setActiveSectionProgress(0)
@@ -1180,54 +1221,24 @@ export default function Home() {
       { once: true }
     )
 
-    let followingTarget: PlaybackTarget | null = null
-
-    if (playbackModeRef.current === "manual") {
-      const deferredTarget = manualDeferredTargetRef.current
-      manualDeferredTargetRef.current = null
-      followingTarget =
-        deferredTarget ??
-        ({
-          timelineId: nextCurrentItem.timelineId,
-          section: nextCurrentItem.section,
-          stateName: null,
-          crossfadeDurationSec: nextCurrentItem.crossfadeDurationSec,
-          fadeIn: false,
-          fadeOut: false,
-        } satisfies PlaybackTarget)
-      setCodeRuntimeStatusValue(null)
-    } else if (playbackModeRef.current === "code") {
-      const navigator = codeNavigatorRef.current
-      const timeline = getPreparedTimelineById(nextCurrentItem.timelineId)
-
-      if (!navigator || !timeline) {
-        stopPlaybackRef.current()
-        return
-      }
-
-      navigator.tick()
-      const status = navigator.getStatus()
-      setCodeRuntimeStatusValue(status)
-
-      if (status.currentStateName) {
-        updateTimeline(nextCurrentItem.timelineId, (timelineState) => ({
-          ...timelineState,
-          lastActiveCodeState: status.currentStateName,
-        }))
-      }
-
-      followingTarget = getCodeTargetFromStatus(
-        timeline,
-        timeline.compiledProgram,
-        status,
-        "next"
-      )
-    }
+    const deferredTarget = manualDeferredTargetRef.current
+    manualDeferredTargetRef.current = null
+    const followingTarget =
+      deferredTarget ??
+      ({
+        timelineId: nextCurrentItem.timelineId,
+        section: nextCurrentItem.section,
+        stateName: null,
+        crossfadeDurationSec: nextCurrentItem.crossfadeDurationSec,
+        fadeIn: false,
+        fadeOut: false,
+      } satisfies PlaybackTarget)
+    setCodeRuntimeStatusValue(null)
 
     try {
       const queued = await scheduleQueuedPlayback(nextCurrentItem, followingTarget)
 
-      if (!queued && playbackModeRef.current === "manual" && followingTarget) {
+      if (!queued && followingTarget) {
         manualDeferredTargetRef.current = followingTarget
         updatePendingSelection(getTargetSelection(nextCurrentItem))
       }
@@ -1243,16 +1254,10 @@ export default function Home() {
     timeline,
     currentTarget,
     nextTarget,
-    mode,
-    navigator,
-    status,
   }: {
     timeline: PreparedTimeline
     currentTarget: PlaybackTarget
     nextTarget: PlaybackTarget | null
-    mode: PlaybackMode
-    navigator: Navigator | null
-    status: NavigatorStatus | null
   }) {
     if (!timeline.audioBuffer) {
       return
@@ -1298,9 +1303,8 @@ export default function Home() {
 
     currentSourceRef.current = currentSource
     currentPlaybackRef.current = nextCurrentItem
-    codeNavigatorRef.current = mode === "code" ? navigator : null
-    setPlaybackModeValue(mode)
-    setCodeRuntimeStatusValue(mode === "code" ? status : null)
+    setPlaybackModeValue("manual")
+    setCodeRuntimeStatusValue(null)
     setSelectedTimelineId(timeline.id)
     updateActiveSelection(getTargetSelection(nextCurrentItem))
     updatePendingSelection(null)
@@ -1310,13 +1314,16 @@ export default function Home() {
 
     const queued = await scheduleQueuedPlayback(nextCurrentItem, nextTarget)
 
-    if (!queued && mode === "manual" && nextTarget) {
+    if (!queued && nextTarget) {
       manualDeferredTargetRef.current = nextTarget
       updatePendingSelection(getTargetSelection(nextCurrentItem))
     }
   }
 
   stopPlaybackRef.current = (clearActive = true) => {
+    const activeCodePlayer = codePlayerRef.current
+
+    codePlayerRef.current = null
     playbackTokenRef.current += 1
     stopAllAudioOverlays()
     safeStopSource(scheduledSourceRef.current)
@@ -1327,7 +1334,6 @@ export default function Home() {
     scheduledPlaybackRef.current = null
     currentFadeOutOverlayRef.current = null
     queuedFadeInOverlayRef.current = null
-    codeNavigatorRef.current = null
     manualDeferredTargetRef.current = null
     updatePendingSelection(null)
     setPlaybackModeValue("idle")
@@ -1337,6 +1343,10 @@ export default function Home() {
 
     if (clearActive) {
       updateActiveSelection(null)
+    }
+
+    if (activeCodePlayer) {
+      void activeCodePlayer.destroy()
     }
   }
 
@@ -1350,9 +1360,6 @@ export default function Home() {
       timeline,
       currentTarget: target,
       nextTarget: target,
-      mode: "manual",
-      navigator: null,
-      status: null,
     })
   }
 
@@ -1382,45 +1389,83 @@ export default function Home() {
     stateName: string,
     instructionIndex = 0
   ) {
-    const navigator = createNavigator(program)
-    navigator.start(stateName, instructionIndex)
-    const status = navigator.getStatus()
-    const currentTarget = getCodeTargetFromStatus(
-      timeline,
-      program,
-      status,
-      "current"
-    )
+    const sourceBlob = await getTimelineSourceBlob(timeline.id)
 
-    if (!currentTarget) {
-      throw new Error(`State '${stateName}' does not point to a playable section.`)
+    if (!sourceBlob) {
+      throw new Error("The selected track is missing its source audio file.")
     }
 
-    const nextTarget = getCodeTargetFromStatus(timeline, program, status, "next")
+    stopPlaybackRef.current()
 
-    updateTimeline(timeline.id, (timelineState) => ({
-      ...timelineState,
-      lastActiveCodeState: status.currentStateName,
-    }))
+    const audioContext = await ensureAudioContext({ resume: false })
+    const player = await createMixPlayer(
+      sourceBlob,
+      {
+        audioContext,
+        autoResumeOnPlay: true,
+        crossfadeDurationMs: timeline.crossfadeDurationSec * 1000,
+      },
+      program
+    )
 
-    await beginPlaybackSequence({
-      timeline,
-      currentTarget,
-      nextTarget,
-      mode: "code",
-      navigator,
-      status,
+    const unsubscribe = player.subscribe((event) => {
+      if (codePlayerRef.current !== player) {
+        return
+      }
+
+      if (event.type === "error") {
+        setErrorMessage(event.error.message)
+        return
+      }
+
+      syncCodePlayerStatus(timeline.id, event.status)
+
+      if (event.status.transportState === "idle" && codePlayerRef.current === player) {
+        codePlayerRef.current = null
+        unsubscribe()
+      }
     })
+
+    codePlayerRef.current = player
+    setErrorMessage(null)
+
+    try {
+      await player.play({ instructionIndex, stateName })
+      syncCodePlayerStatus(timeline.id, player.getStatus())
+    } catch (error) {
+      codePlayerRef.current = null
+      unsubscribe()
+      await player.destroy()
+      throw error
+    }
   }
 
   async function togglePlaybackPause() {
-    const audioContext = audioContextRef.current
-
-    if (!audioContext || !activeSelection) {
+    if (!activeSelection) {
       return
     }
 
     try {
+      if (playbackModeRef.current === "code" && codePlayerRef.current) {
+        if (codeRuntimeStatusRef.current?.transportState === "paused") {
+          await codePlayerRef.current.resume()
+        } else {
+          await codePlayerRef.current.pause()
+        }
+
+        syncCodePlayerStatus(
+          activeSelection.timelineId,
+          codePlayerRef.current.getStatus()
+        )
+        return
+      }
+
+      const audioContext = audioContextRef.current
+
+      if (!audioContext) {
+        return
+      }
+
       if (audioContext.state === "running") {
         await audioContext.suspend()
         setIsPlaybackPaused(true)
@@ -1554,9 +1599,7 @@ export default function Home() {
     })
 
     if (playbackModeRef.current === "code") {
-      codeNavigatorRef.current = null
-      setCodeRuntimeStatusValue(null)
-      setPlaybackModeValue("manual")
+      stopPlaybackRef.current()
     }
 
     if (options?.instant) {
@@ -1588,11 +1631,17 @@ export default function Home() {
   }
 
   async function handleRunCode(timeline: PreparedTimeline) {
-    const compileResult = compileMusicDsl(
+    const compileResult = compileDsl(
       timeline.dslInput,
-      getMusicDslMetadata(timeline)
+      {
+        bpm: timeline.bpmIsValid ? timeline.bpmValue : 0,
+        beatsPerSection: 16,
+        sectionCount: timeline.sections.length,
+        sourceId: timeline.fileName,
+        trimMs: timeline.trimValue,
+      }
     )
-    const compiledProgram = compileResult.program
+    const compiledProgram = compileResult.compiled
     const selectedCodeState =
       compiledProgram && timeline.selectedCodeState
         ? compiledProgram.states[timeline.selectedCodeState]
@@ -1701,9 +1750,9 @@ export default function Home() {
       return
     }
 
-    const navigator = codeNavigatorRef.current
+    const player = codePlayerRef.current
 
-    if (!navigator) {
+    if (!player) {
       return
     }
 
@@ -1713,30 +1762,8 @@ export default function Home() {
     }))
 
     try {
-      navigator.goTo(stateName)
-      const status = navigator.getStatus()
-      setCodeRuntimeStatusValue(status)
-      const currentItem = currentPlaybackRef.current
-
-      if (!currentItem) {
-        return
-      }
-
-      const nextTarget = getCodeTargetFromStatus(
-        timeline,
-        timeline.compiledProgram,
-        status,
-        "next"
-      )
-      const queued = await scheduleQueuedPlayback(currentItem, nextTarget)
-
-      if (!queued) {
-        updatePendingSelection(
-          scheduledPlaybackRef.current
-            ? getTargetSelection(scheduledPlaybackRef.current)
-            : null
-        )
-      }
+      player.goto(stateName)
+      syncCodePlayerStatus(timeline.id, player.getStatus())
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Unable to queue the next state."
@@ -1903,6 +1930,7 @@ export default function Home() {
       timelines[timelineIndex + 1] ?? timelines[timelineIndex - 1] ?? null
 
     timelineTaskTokensRef.current.delete(timelineId)
+    timelineSourceBlobsRef.current.delete(timelineId)
 
     setTimelines((currentTimelines) =>
       currentTimelines.filter((timeline) => timeline.id !== timelineId)
@@ -2052,6 +2080,18 @@ export default function Home() {
     let frameId = 0
 
     const updateProgress = () => {
+      if (playbackModeRef.current === "code" && codePlayerRef.current) {
+        setActiveSectionProgress(
+          codePlayerRef.current.getStatus().currentSectionProgress ?? 0
+        )
+
+        if (!isPlaybackPaused) {
+          frameId = window.requestAnimationFrame(updateProgress)
+        }
+
+        return
+      }
+
       const audioContext = audioContextRef.current
       const currentItem = currentPlaybackRef.current
 
@@ -2315,7 +2355,7 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>Unshuffle Music</title>
+        <title>Mixaudio Studio</title>
         <meta
           content="Drop one or more tracks, set BPM and crossfade per track, then loop 16-beat sections across multiple timelines."
           name="description"

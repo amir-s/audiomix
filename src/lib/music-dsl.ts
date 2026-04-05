@@ -12,7 +12,9 @@ export type SheetMetadata = {
   file: string;
   bpm: number;
   beatsPerSection?: number;
+  trimMs?: number;
   sectionCount: number;
+  sourceId?: string;
 };
 
 export type MusicDslInstructionIdentity = {

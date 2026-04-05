@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { compileDsl, type CompiledMix } from "../index.ts";
 import {
-  compileMusicDsl,
   connectMusicDslInstructions,
   createFreshMusicDslLabel,
   createNavigator,
@@ -13,11 +13,11 @@ import {
 } from "./music-dsl.ts";
 
 function compileProgram(dsl: string, sectionCount = 16): CompiledMusicProgram {
-  const result = compileMusicDsl(dsl, {
-    file: "track.mp3",
+  const result = compileDsl(dsl, {
     bpm: 120,
     beatsPerSection: 16,
     sectionCount,
+    sourceId: "track.mp3",
   });
 
   const errors = result.diagnostics.filter(
@@ -25,9 +25,9 @@ function compileProgram(dsl: string, sectionCount = 16): CompiledMusicProgram {
   );
 
   assert.equal(errors.length, 0, JSON.stringify(result.diagnostics, null, 2));
-  assert.ok(result.program, "Expected the DSL to compile successfully.");
+  assert.ok(result.compiled, "Expected the DSL to compile successfully.");
 
-  return result.program;
+  return result.compiled as CompiledMix;
 }
 
 function createMetadata(sectionCount = 16) {
@@ -40,16 +40,16 @@ function createMetadata(sectionCount = 16) {
 }
 
 test("compiles straight-line states into sequential instructions", () => {
-  const result = compileMusicDsl("calm: 1 2 3", {
-    file: "track.mp3",
+  const result = compileDsl("calm: 1 2 3", {
     bpm: 120,
     sectionCount: 8,
+    sourceId: "track.mp3",
   });
 
-  assert.ok(result.program);
+  assert.ok(result.compiled);
   assert.equal(hasMusicDslErrors(result.diagnostics), false);
   assert.deepEqual(
-    result.program.states.calm.instructions.map((instruction) => ({
+    result.compiled.states.calm.instructions.map((instruction) => ({
       section: instruction.section,
       loopTo: instruction.loopTo,
     })),
@@ -59,20 +59,20 @@ test("compiles straight-line states into sequential instructions", () => {
       { section: 3, loopTo: null },
     ],
   );
-  assert.equal(result.program.states.calm.exhausts, true);
+  assert.equal(result.compiled.states.calm.exhausts, true);
 });
 
 test("flattens nested groups and applies loop-back pointers to repeated groups", () => {
-  const result = compileMusicDsl("main: (1 (2 3) 4)+", {
-    file: "track.mp3",
+  const result = compileDsl("main: (1 (2 3) 4)+", {
     bpm: 120,
     sectionCount: 8,
+    sourceId: "track.mp3",
   });
 
-  assert.ok(result.program);
+  assert.ok(result.compiled);
   assert.equal(hasMusicDslErrors(result.diagnostics), false);
   assert.deepEqual(
-    result.program.states.main.instructions.map((instruction) => ({
+    result.compiled.states.main.instructions.map((instruction) => ({
       section: instruction.section,
       loopTo: instruction.loopTo,
     })),
@@ -83,7 +83,7 @@ test("flattens nested groups and applies loop-back pointers to repeated groups",
       { section: 4, loopTo: 0 },
     ],
   );
-  assert.equal(result.program.states.main.exhausts, false);
+  assert.equal(result.compiled.states.main.exhausts, false);
 });
 
 test("expands counted section repetition into sequential instructions", () => {
@@ -453,7 +453,7 @@ test("exhausting states return null once playback reaches the end", () => {
 });
 
 test("rejects duplicate states and group labels during parsing", () => {
-  const result = compileMusicDsl(
+  const result = compileDsl(
     `
 dup: {a}1
 dup: {a}2
@@ -461,13 +461,13 @@ bad: {a}(1 2)
 alsoBad: (1 2){b}
 `,
     {
-      file: "track.mp3",
       bpm: 120,
       sectionCount: 4,
+      sourceId: "track.mp3",
     },
   );
 
-  assert.equal(result.program, null);
+  assert.equal(result.compiled, null);
   assert.equal(hasMusicDslErrors(result.diagnostics), true);
   assert.ok(
     result.diagnostics.some((diagnostic) =>
@@ -487,19 +487,19 @@ alsoBad: (1 2){b}
 });
 
 test("rejects duplicate entries and out-of-range sections during compilation", () => {
-  const result = compileMusicDsl(
+  const result = compileDsl(
     `
 range: 9
 entries: {a}1 {a}2
 `,
     {
-      file: "track.mp3",
       bpm: 120,
       sectionCount: 4,
+      sourceId: "track.mp3",
     },
   );
 
-  assert.equal(result.program, null);
+  assert.equal(result.compiled, null);
   assert.equal(hasMusicDslErrors(result.diagnostics), true);
   assert.ok(
     result.diagnostics.some((diagnostic) =>
@@ -514,7 +514,7 @@ entries: {a}1 {a}2
 });
 
 test("rejects invalid counted repetition syntax", () => {
-  const result = compileMusicDsl(
+  const result = compileDsl(
     `
 zero: 1*0
 missing: 1*
@@ -522,13 +522,13 @@ doubleA: 1*3+
 doubleB: 1+*3
 `,
     {
-      file: "track.mp3",
       bpm: 120,
       sectionCount: 8,
+      sourceId: "track.mp3",
     },
   );
 
-  assert.equal(result.program, null);
+  assert.equal(result.compiled, null);
   assert.equal(hasMusicDslErrors(result.diagnostics), true);
   assert.ok(
     result.diagnostics.some((diagnostic) =>
@@ -548,19 +548,19 @@ doubleB: 1+*3
 });
 
 test("emits warnings for unmatched exit labels and exhausting states", () => {
-  const result = compileMusicDsl(
+  const result = compileDsl(
     `
 intro: 1{x} 2
 combat: 3 4
 `,
     {
-      file: "track.mp3",
       bpm: 120,
       sectionCount: 8,
+      sourceId: "track.mp3",
     },
   );
 
-  assert.ok(result.program);
+  assert.ok(result.compiled);
 
   const warnings = result.diagnostics.filter(
     (diagnostic) => diagnostic.severity === "warning",
