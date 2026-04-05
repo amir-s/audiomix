@@ -3,8 +3,12 @@ import test from "node:test";
 
 import {
   compileMusicDsl,
+  connectMusicDslInstructions,
+  createFreshMusicDslLabel,
   createNavigator,
+  getInstructionIdentity,
   hasMusicDslErrors,
+  toggleMusicDslInstructionFade,
   type CompiledMusicProgram,
 } from "./music-dsl.ts";
 
@@ -24,6 +28,15 @@ function compileProgram(dsl: string, sectionCount = 16): CompiledMusicProgram {
   assert.ok(result.program, "Expected the DSL to compile successfully.");
 
   return result.program;
+}
+
+function createMetadata(sectionCount = 16) {
+  return {
+    file: "track.mp3",
+    bpm: 120,
+    beatsPerSection: 16,
+    sectionCount,
+  };
 }
 
 test("compiles straight-line states into sequential instructions", () => {
@@ -380,6 +393,43 @@ loop: 1 2 1 3+
   assert.equal(navigator.getStatus().currentInstructionIndex, 2);
 });
 
+test("navigator can start from an arbitrary instruction index", () => {
+  const program = compileProgram(`
+loop: 1 2 3+
+`);
+  const navigator = createNavigator(program);
+
+  navigator.start("loop", 1);
+
+  assert.deepEqual(navigator.getStatus(), {
+    currentStateName: "loop",
+    currentSection: 2,
+    currentInstructionIndex: 1,
+    nextStateName: "loop",
+    nextSection: 3,
+    nextInstructionIndex: 2,
+    pendingTargetStateName: null,
+    nextComesFromPendingTransition: false,
+  });
+
+  navigator.tick();
+  assert.equal(navigator.current(), 3);
+  assert.equal(navigator.getStatus().currentInstructionIndex, 2);
+
+  navigator.tick();
+  assert.equal(navigator.current(), 3);
+  assert.equal(navigator.getStatus().currentInstructionIndex, 2);
+});
+
+test("navigator rejects out-of-range start instruction indexes", () => {
+  const program = compileProgram("loop: 1 2 3+");
+  const navigator = createNavigator(program);
+
+  assert.throws(() => {
+    navigator.start("loop", 3);
+  }, /out of range/);
+});
+
 test("exhausting states return null once playback reaches the end", () => {
   const program = compileProgram("ending: 1 2 3");
   const navigator = createNavigator(program);
@@ -525,5 +575,258 @@ combat: 3 4
     warnings.some((diagnostic) =>
       diagnostic.message.includes("exhausts instead of looping"),
     ),
+  );
+});
+
+test("tracks stable source identities for compiled instructions", () => {
+  const program = compileProgram(`
+main: {a}1{b}*3 (2 3)+
+`);
+
+  assert.deepEqual(
+    program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      sourceElementKey: instruction.sourceElementKey,
+      sourceOccurrenceIndex: instruction.sourceOccurrenceIndex,
+    })),
+    [
+      { section: 1, sourceElementKey: "0", sourceOccurrenceIndex: 0 },
+      { section: 1, sourceElementKey: "0", sourceOccurrenceIndex: 1 },
+      { section: 1, sourceElementKey: "0", sourceOccurrenceIndex: 2 },
+      { section: 2, sourceElementKey: "1.0", sourceOccurrenceIndex: 0 },
+      { section: 3, sourceElementKey: "1.1", sourceOccurrenceIndex: 0 },
+    ],
+  );
+});
+
+test("toggles fade flags on a plain visualized section", () => {
+  const dsl = "main: 1 2";
+  const program = compileProgram(dsl);
+  const target = getInstructionIdentity("main", program.states.main.instructions[1]!);
+  const editResult = toggleMusicDslInstructionFade({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    target,
+    field: "fadeOut",
+  });
+
+  assert.equal(editResult.dsl, "main: 1 2!");
+  assert.ok(editResult.compileResult.program);
+  assert.equal(
+    editResult.compileResult.program.states.main.instructions[1]!.fadeOut,
+    true,
+  );
+});
+
+test("materializes inherited fades before toggling an individual visualized section", () => {
+  const dsl = "main: !(1 2 3)!+";
+  const program = compileProgram(dsl);
+  const target = getInstructionIdentity("main", program.states.main.instructions[1]!);
+  const editResult = toggleMusicDslInstructionFade({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    target,
+    field: "fadeIn",
+  });
+
+  assert.equal(editResult.dsl, "main: (!1! 2! !3!)+");
+  assert.ok(editResult.compileResult.program);
+  assert.deepEqual(
+    editResult.compileResult.program.states.main.instructions.map((instruction) => ({
+      section: instruction.section,
+      fadeIn: instruction.fadeIn,
+      fadeOut: instruction.fadeOut,
+    })),
+    [
+      { section: 1, fadeIn: true, fadeOut: true },
+      { section: 2, fadeIn: false, fadeOut: true },
+      { section: 3, fadeIn: true, fadeOut: true },
+    ],
+  );
+});
+
+test("toggles repeated-source fades on every generated copy", () => {
+  const dsl = "main: 1*3";
+  const program = compileProgram(dsl);
+  const target = getInstructionIdentity("main", program.states.main.instructions[1]!);
+  const editResult = toggleMusicDslInstructionFade({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    target,
+    field: "fadeIn",
+  });
+
+  assert.equal(editResult.dsl, "main: !1*3");
+  assert.ok(editResult.compileResult.program);
+  assert.deepEqual(
+    editResult.compileResult.program.states.main.instructions.map((instruction) => ({
+      fadeIn: instruction.fadeIn,
+      sourceOccurrenceIndex: instruction.sourceOccurrenceIndex,
+    })),
+    [
+      { fadeIn: true, sourceOccurrenceIndex: 0 },
+      { fadeIn: true, sourceOccurrenceIndex: 1 },
+      { fadeIn: true, sourceOccurrenceIndex: 2 },
+    ],
+  );
+});
+
+test("creates fresh labels from unused single letters before falling back to two letters", () => {
+  assert.equal(createFreshMusicDslLabel(new Set(["a"]), () => 0), "b");
+  assert.equal(
+    createFreshMusicDslLabel(
+      new Set("abcdefghijklmnopqrstuvwxyz".split("")),
+      () => 0,
+    ),
+    "aa",
+  );
+});
+
+test("connects a source-only labeled node into an unlabeled target when no entry conflict exists", () => {
+  const dsl = `
+source: 1{a}
+target: 2+
+`;
+  const program = compileProgram(dsl);
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[0]!),
+    target: getInstructionIdentity("target", program.states.target.instructions[0]!),
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{a}\ntarget: {a}2+");
+  assert.ok(editResult.compileResult.program);
+  assert.equal(
+    editResult.compileResult.program.states.target.instructions[0]!.entryLabel,
+    "a",
+  );
+});
+
+test("reuses the target label when the source is unlabeled", () => {
+  const dsl = `
+source: 1
+target: {b}2+
+`;
+  const program = compileProgram(dsl);
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[0]!),
+    target: getInstructionIdentity("target", program.states.target.instructions[0]!),
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{b}\ntarget: {b}2+");
+});
+
+test("lets the target label win when both nodes already have different labels", () => {
+  const dsl = `
+source: 1{x}
+target: {y}2+
+`;
+  const program = compileProgram(dsl);
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[0]!),
+    target: getInstructionIdentity("target", program.states.target.instructions[0]!),
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{y}\ntarget: {y}2+");
+});
+
+test("creates a fresh label when reusing the source label would duplicate a target entry", () => {
+  const dsl = `
+source: 1{a}
+target: {a}2 3+
+`;
+  const program = compileProgram(dsl);
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[0]!),
+    target: getInstructionIdentity("target", program.states.target.instructions[1]!),
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{b}\ntarget: {a}2 {b}3+");
+  assert.ok(editResult.compileResult.program);
+  assert.deepEqual(editResult.compileResult.program.states.target.entryPoints, {
+    a: 0,
+    b: 1,
+  });
+});
+
+test("connecting into a later repeated target copy resolves to the first generated copy", () => {
+  const dsl = `
+source: 1
+target: 2*3
+`;
+  const program = compileProgram(dsl);
+  const laterRepeatedTarget = getInstructionIdentity(
+    "target",
+    program.states.target.instructions[2]!,
+  );
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[0]!),
+    target: laterRepeatedTarget,
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{a}\ntarget: {a}2*3");
+  assert.ok(editResult.compileResult.program);
+  assert.deepEqual(
+    editResult.compileResult.program.states.target.instructions.map((instruction) => ({
+      entryLabel: instruction.entryLabel,
+      sourceOccurrenceIndex: instruction.sourceOccurrenceIndex,
+    })),
+    [
+      { entryLabel: "a", sourceOccurrenceIndex: 0 },
+      { entryLabel: null, sourceOccurrenceIndex: 1 },
+      { entryLabel: null, sourceOccurrenceIndex: 2 },
+    ],
+  );
+});
+
+test("connecting from a repeated source updates every generated exit copy", () => {
+  const dsl = `
+source: 1*3
+target: 2+
+`;
+  const program = compileProgram(dsl);
+  const editResult = connectMusicDslInstructions({
+    dsl,
+    metadata: createMetadata(),
+    program,
+    source: getInstructionIdentity("source", program.states.source.instructions[1]!),
+    target: getInstructionIdentity("target", program.states.target.instructions[0]!),
+    random: () => 0,
+  });
+
+  assert.equal(editResult.dsl.trim(), "source: 1{a}*3\ntarget: {a}2+");
+  assert.ok(editResult.compileResult.program);
+  assert.deepEqual(
+    editResult.compileResult.program.states.source.instructions.map((instruction) => ({
+      exitLabel: instruction.exitLabel,
+      sourceOccurrenceIndex: instruction.sourceOccurrenceIndex,
+    })),
+    [
+      { exitLabel: "a", sourceOccurrenceIndex: 0 },
+      { exitLabel: "a", sourceOccurrenceIndex: 1 },
+      { exitLabel: "a", sourceOccurrenceIndex: 2 },
+    ],
   );
 });

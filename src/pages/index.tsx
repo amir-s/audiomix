@@ -58,11 +58,17 @@ import {
 import { getRuntimeCrossfadeOverlayPlan } from "@/lib/crossfade-runtime"
 import {
   compileMusicDsl,
+  connectMusicDslInstructions,
   createNavigator,
+  findCompiledInstructionByIdentity,
+  type MusicDslEditResult,
   type CompiledMusicProgram,
   type MusicDslDiagnostic,
+  type MusicDslInstructionIdentity,
   type Navigator,
   type NavigatorStatus,
+  type SheetMetadata,
+  toggleMusicDslInstructionFade,
 } from "@/lib/music-dsl"
 import {
   deleteTimelineFile,
@@ -97,6 +103,10 @@ type TimelineState = PersistedTimelineMetadata & {
 type TimelineSelection = {
   timelineId: string
   sectionId: string
+}
+
+type DslVisualizerSelection = MusicDslInstructionIdentity & {
+  timelineId: string
 }
 
 type FadeControls = {
@@ -373,6 +383,15 @@ function getDslDebugOutput(timeline: PreparedTimeline) {
   )
 }
 
+function getMusicDslMetadata(timeline: PreparedTimeline): SheetMetadata {
+  return {
+    file: timeline.fileName,
+    bpm: timeline.bpmIsValid ? timeline.bpmValue : 0,
+    beatsPerSection: 16,
+    sectionCount: timeline.sections.length,
+  }
+}
+
 export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null)
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
@@ -414,6 +433,8 @@ export default function Home() {
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("idle")
   const [codeRuntimeStatus, setCodeRuntimeStatus] =
     useState<NavigatorStatus | null>(null)
+  const [selectedDslInstruction, setSelectedDslInstruction] =
+    useState<DslVisualizerSelection | null>(null)
 
   const preparedTimelines: PreparedTimeline[] = timelines.map((timeline) => {
     const bpmValue = Number.parseFloat(timeline.bpmInput)
@@ -518,6 +539,160 @@ export default function Home() {
       preparedTimelinesRef.current.find((timeline) => timeline.id === timelineId) ??
       null
     )
+  }
+
+  function applyVisualizerEditResult(
+    timeline: PreparedTimeline,
+    editResult: MusicDslEditResult
+  ) {
+    const compiledProgram = editResult.compileResult.program
+
+    if (!compiledProgram) {
+      throw new Error("The visual edit did not produce a playable DSL program.")
+    }
+
+    const isActiveCodeTimeline =
+      playbackModeRef.current === "code" && activeSelection?.timelineId === timeline.id
+
+    if (isActiveCodeTimeline) {
+      stopPlaybackRef.current()
+    }
+
+    const nextSelectedCodeState =
+      timeline.selectedCodeState && compiledProgram.states[timeline.selectedCodeState]
+        ? timeline.selectedCodeState
+        : compiledProgram.stateOrder[0] ?? null
+
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      dslInput: editResult.dsl,
+      compiledProgram,
+      lastCompiledDslInput: editResult.dsl,
+      lastCompiledSectionCount: timeline.sections.length,
+      lastRunDiagnostics: editResult.compileResult.diagnostics,
+      selectedCodeState: nextSelectedCodeState,
+    }))
+
+    setSelectedDslInstruction(
+      editResult.selection ? { timelineId: timeline.id, ...editResult.selection } : null
+    )
+    setErrorMessage(null)
+  }
+
+  function handleVisualizerInstructionClick(
+    timeline: PreparedTimeline,
+    instruction: MusicDslInstructionIdentity,
+    options?: { connect?: boolean; force?: boolean }
+  ) {
+    if (!timeline.compiledProgram) {
+      return
+    }
+
+    const nextSelection: DslVisualizerSelection = {
+      timelineId: timeline.id,
+      ...instruction,
+    }
+
+    if (!options?.connect) {
+      if (options?.force) {
+        setSelectedDslInstruction(nextSelection)
+        void handlePlayCodeInstruction(timeline, nextSelection)
+        return
+      }
+
+      setSelectedDslInstruction(nextSelection)
+      return
+    }
+
+    if (!selectedDslInstruction || selectedDslInstruction.timelineId !== timeline.id) {
+      setSelectedDslInstruction(nextSelection)
+      return
+    }
+
+    try {
+      const editResult = connectMusicDslInstructions({
+        dsl: timeline.dslInput,
+        metadata: getMusicDslMetadata(timeline),
+        program: timeline.compiledProgram,
+        source: selectedDslInstruction,
+        target: nextSelection,
+      })
+
+      applyVisualizerEditResult(timeline, editResult)
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to connect the selected visual nodes."
+      )
+    }
+  }
+
+  async function handlePlayCodeInstruction(
+    timeline: PreparedTimeline,
+    target: DslVisualizerSelection
+  ) {
+    if (!timeline.compiledProgram || timeline.codeIsDirty) {
+      return
+    }
+
+    const resolvedInstruction = findCompiledInstructionByIdentity(
+      timeline.compiledProgram,
+      target
+    )
+
+    if (!resolvedInstruction) {
+      setErrorMessage("The selected visual node no longer exists.")
+      return
+    }
+
+    updateTimeline(timeline.id, (timelineState) => ({
+      ...timelineState,
+      selectedCodeState: resolvedInstruction.stateName,
+    }))
+
+    try {
+      await startCodePlayback(
+        timeline,
+        timeline.compiledProgram,
+        resolvedInstruction.stateName,
+        resolvedInstruction.index
+      )
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to start playback from the selected visual node."
+      )
+    }
+  }
+
+  function handleVisualizerFadeToggle(
+    timeline: PreparedTimeline,
+    target: DslVisualizerSelection,
+    field: keyof FadeControls
+  ) {
+    if (!timeline.compiledProgram) {
+      return
+    }
+
+    try {
+      const editResult = toggleMusicDslInstructionFade({
+        dsl: timeline.dslInput,
+        metadata: getMusicDslMetadata(timeline),
+        program: timeline.compiledProgram,
+        target,
+        field,
+      })
+
+      applyVisualizerEditResult(timeline, editResult)
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to update the selected visual node."
+      )
+    }
   }
 
   function createTaskToken(timelineId: string) {
@@ -1204,10 +1379,11 @@ export default function Home() {
   async function startCodePlayback(
     timeline: PreparedTimeline,
     program: CompiledMusicProgram,
-    stateName: string
+    stateName: string,
+    instructionIndex = 0
   ) {
     const navigator = createNavigator(program)
-    navigator.start(stateName)
+    navigator.start(stateName, instructionIndex)
     const status = navigator.getStatus()
     const currentTarget = getCodeTargetFromStatus(
       timeline,
@@ -1333,6 +1509,40 @@ export default function Home() {
     handleTimelineFadeToggle(selectedTimeline, fadeField)
   })
 
+  const handleVisualizerFadeHotkeys = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.repeat ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.shiftKey ||
+      dslViewMode !== "visual" ||
+      !selectedTimeline ||
+      !selectedTimeline.compiledProgram ||
+      selectedTimeline.codeIsDirty ||
+      !selectedDslInstruction ||
+      selectedDslInstruction.timelineId !== selectedTimeline.id ||
+      isTextEntryTarget(event.target)
+    ) {
+      return
+    }
+
+    let fadeField: keyof FadeControls | null = null
+
+    if (event.code === "KeyI") {
+      fadeField = "fadeIn"
+    } else if (event.code === "KeyO") {
+      fadeField = "fadeOut"
+    }
+
+    if (fadeField === null) {
+      return
+    }
+
+    event.preventDefault()
+    handleVisualizerFadeToggle(selectedTimeline, selectedDslInstruction, fadeField)
+  })
+
   async function handleSectionSelect(
     timeline: PreparedTimeline,
     section: AudioSection,
@@ -1378,12 +1588,10 @@ export default function Home() {
   }
 
   async function handleRunCode(timeline: PreparedTimeline) {
-    const compileResult = compileMusicDsl(timeline.dslInput, {
-      file: timeline.fileName,
-      bpm: timeline.bpmIsValid ? timeline.bpmValue : 0,
-      beatsPerSection: 16,
-      sectionCount: timeline.sections.length,
-    })
+    const compileResult = compileMusicDsl(
+      timeline.dslInput,
+      getMusicDslMetadata(timeline)
+    )
     const compiledProgram = compileResult.program
     const selectedCodeState =
       compiledProgram && timeline.selectedCodeState
@@ -1741,6 +1949,28 @@ export default function Home() {
   }, [preparedTimelines, selectedTimelineId])
 
   useEffect(() => {
+    if (!selectedDslInstruction) {
+      return
+    }
+
+    const selectionTimeline = preparedTimelines.find(
+      (timeline) => timeline.id === selectedDslInstruction.timelineId
+    )
+
+    if (
+      !selectionTimeline ||
+      !selectionTimeline.compiledProgram ||
+      selectionTimeline.codeIsDirty ||
+      !findCompiledInstructionByIdentity(
+        selectionTimeline.compiledProgram,
+        selectedDslInstruction
+      )
+    ) {
+      setSelectedDslInstruction(null)
+    }
+  }, [preparedTimelines, selectedDslInstruction])
+
+  useEffect(() => {
     function hasFiles(event: DragEvent) {
       return Array.from(event.dataTransfer?.types ?? []).includes("Files")
     }
@@ -1985,6 +2215,7 @@ export default function Home() {
 
   useEffect(() => {
     function handleWindowKeyDown(event: KeyboardEvent) {
+      handleVisualizerFadeHotkeys(event)
       handleFreePlayFadeHotkeys(event)
       handleSpacebarToggle(event)
     }
@@ -2534,15 +2765,37 @@ export default function Home() {
                           </FieldDescription>
                         </>
                       ) : selectedTimeline.compiledProgram && !selectedTimeline.codeIsDirty ? (
-                        <MusicDslVisualizer
-                          program={selectedTimeline.compiledProgram}
-                          activeStateName={selectedTimelineActiveCodeState}
-                          activeInstructionIndex={codeRuntimeStatus?.currentInstructionIndex ?? null}
-                          pendingStateName={selectedTimelinePendingCodeState}
-                          onStateClick={(name, opts) =>
-                            handleCodeStateButtonPress(selectedTimeline, name, opts)
-                          }
-                        />
+                        <>
+                          <MusicDslVisualizer
+                            program={selectedTimeline.compiledProgram}
+                            activeStateName={selectedTimelineActiveCodeState}
+                            activeInstructionIndex={
+                              codeRuntimeStatus?.currentInstructionIndex ?? null
+                            }
+                            pendingStateName={selectedTimelinePendingCodeState}
+                            selectedInstruction={
+                              selectedDslInstruction?.timelineId === selectedTimeline.id
+                                ? selectedDslInstruction
+                                : null
+                            }
+                            onInstructionClick={(instruction, options) => {
+                              handleVisualizerInstructionClick(
+                                selectedTimeline,
+                                instruction,
+                                options
+                              )
+                            }}
+                            onStateClick={(name, opts) =>
+                              handleCodeStateButtonPress(selectedTimeline, name, opts)
+                            }
+                          />
+                          <FieldDescription>
+                            Click a box to select it. Use Cmd/Ctrl+Click to play
+                            from that node, Option/Alt+Click to connect from the
+                            selected box, and press I or O to toggle fade in or
+                            fade out on the selected node.
+                          </FieldDescription>
+                        </>
                       ) : (
                         <div className="flex min-h-40 items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/10 text-sm text-muted-foreground">
                           {selectedTimeline.codeIsDirty

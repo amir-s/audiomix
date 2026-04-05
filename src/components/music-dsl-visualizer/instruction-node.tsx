@@ -1,4 +1,4 @@
-import { type RefCallback } from "react"
+import { type MouseEventHandler, type RefCallback } from "react"
 
 import { type CompiledInstruction } from "@/lib/music-dsl"
 import { cn } from "@/lib/utils"
@@ -8,32 +8,44 @@ import { getLabelColor } from "./label-colors"
 type InstructionNodeProps = {
   instruction: CompiledInstruction
   isActive: boolean
+  isSelected: boolean
   entryBadgeRef?: RefCallback<HTMLElement>
   exitBadgeRef?: RefCallback<HTMLElement>
+  onClick?: MouseEventHandler<HTMLButtonElement>
 }
 
 export function InstructionNode({
   instruction,
   isActive,
+  isSelected,
   entryBadgeRef,
   exitBadgeRef,
+  onClick,
 }: InstructionNodeProps) {
   return (
-    <div
+    <button
+      aria-pressed={isSelected}
       className={cn(
-        "flex w-[72px] shrink-0 flex-col items-center gap-1 rounded-lg border px-2 py-1.5 text-xs",
-        isActive
-          ? "border-emerald-400/70 bg-emerald-400/15 ring-2 ring-emerald-400/40"
-          : "border-border/60 bg-muted/20"
+        "flex w-[72px] shrink-0 cursor-pointer flex-col items-center gap-1 rounded-lg border px-2 py-1.5 text-xs text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+        isActive && isSelected
+          ? "border-emerald-400/80 bg-emerald-400/15 ring-2 ring-sky-400/45"
+          : isActive
+            ? "border-emerald-400/70 bg-emerald-400/15 ring-2 ring-emerald-400/40"
+            : isSelected
+              ? "border-sky-400/70 bg-sky-400/10 ring-2 ring-sky-400/35"
+              : "border-border/60 bg-muted/20 hover:bg-muted/30"
       )}
+      onClick={onClick}
       style={
-        isActive
+        isActive || isSelected
           ? undefined
           : {
               ...(instruction.fadeIn ? { borderLeftColor: "rgb(52 211 153 / 0.8)" } : {}),
               ...(instruction.fadeOut ? { borderRightColor: "rgb(251 191 36 / 0.8)" } : {}),
             }
       }
+      title="Click to select. Cmd/Ctrl+Click plays from here. Option/Alt+Click connects from the selected node."
+      type="button"
     >
       {instruction.entryLabel ? (
         <span
@@ -81,6 +93,6 @@ export function InstructionNode({
           </span>
         )}
       </div>
-    </div>
+    </button>
   )
 }

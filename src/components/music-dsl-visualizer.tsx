@@ -1,6 +1,9 @@
 import { useRef, useState, useEffect } from "react"
 
-import { type CompiledMusicProgram } from "@/lib/music-dsl"
+import {
+  type CompiledMusicProgram,
+  type MusicDslInstructionIdentity,
+} from "@/lib/music-dsl"
 
 import { StateRow } from "./music-dsl-visualizer/state-row"
 import { useNodePositions } from "./music-dsl-visualizer/use-node-positions"
@@ -11,6 +14,11 @@ type MusicDslVisualizerProps = {
   activeStateName: string | null
   activeInstructionIndex: number | null
   pendingStateName: string | null
+  selectedInstruction?: MusicDslInstructionIdentity | null
+  onInstructionClick?: (
+    instruction: MusicDslInstructionIdentity,
+    options?: { connect?: boolean; force?: boolean }
+  ) => void
   onStateClick?: (stateName: string, options?: { force?: boolean }) => void
 }
 
@@ -19,6 +27,8 @@ export function MusicDslVisualizer({
   activeStateName,
   activeInstructionIndex,
   pendingStateName,
+  selectedInstruction,
+  onInstructionClick,
   onStateClick,
 }: MusicDslVisualizerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -60,6 +70,8 @@ export function MusicDslVisualizer({
               activeInstructionIndex={
                 activeStateName === stateName ? activeInstructionIndex : null
               }
+              selectedInstruction={selectedInstruction}
+              onInstructionClick={onInstructionClick}
               onStateClick={onStateClick}
               registerBadgeRef={registerBadgeRef}
             />

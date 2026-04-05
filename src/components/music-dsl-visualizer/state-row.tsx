@@ -1,7 +1,11 @@
 import { type RefCallback } from "react"
 
 import { Button } from "@/components/ui/button"
-import { type CompiledState } from "@/lib/music-dsl"
+import {
+  getInstructionIdentity,
+  type CompiledState,
+  type MusicDslInstructionIdentity,
+} from "@/lib/music-dsl"
 import { cn } from "@/lib/utils"
 
 import { InstructionNode } from "./instruction-node"
@@ -23,6 +27,11 @@ type StateRowProps = {
   isActive: boolean
   isPending: boolean
   activeInstructionIndex: number | null
+  selectedInstruction?: MusicDslInstructionIdentity | null
+  onInstructionClick?: (
+    instruction: MusicDslInstructionIdentity,
+    options?: { connect?: boolean; force?: boolean }
+  ) => void
   onStateClick?: (stateName: string, options?: { force?: boolean }) => void
   registerBadgeRef: (key: string) => RefCallback<HTMLElement>
 }
@@ -32,6 +41,8 @@ export function StateRow({
   isActive,
   isPending,
   activeInstructionIndex,
+  selectedInstruction,
+  onInstructionClick,
   onStateClick,
   registerBadgeRef,
 }: StateRowProps) {
@@ -61,11 +72,20 @@ export function StateRow({
   }
 
   function renderNode(instr: (typeof state.instructions)[number]) {
+    const instructionIdentity = getInstructionIdentity(state.name, instr)
+
     return (
       <div key={instr.position}>
         <InstructionNode
           instruction={instr}
           isActive={isActive && activeInstructionIndex === instr.position}
+          isSelected={
+            selectedInstruction?.stateName === instructionIdentity.stateName &&
+            selectedInstruction.sourceElementKey ===
+              instructionIdentity.sourceElementKey &&
+            selectedInstruction.sourceOccurrenceIndex ===
+              instructionIdentity.sourceOccurrenceIndex
+          }
           entryBadgeRef={
             instr.entryLabel
               ? registerBadgeRef(`${state.name}:${instr.position}:entry`)
@@ -76,6 +96,12 @@ export function StateRow({
               ? registerBadgeRef(`${state.name}:${instr.position}:exit`)
               : undefined
           }
+          onClick={(event) => {
+            onInstructionClick?.(instructionIdentity, {
+              connect: event.altKey,
+              force: event.metaKey || event.ctrlKey,
+            })
+          }}
         />
       </div>
     )

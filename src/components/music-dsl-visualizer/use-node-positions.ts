@@ -42,13 +42,28 @@ export function useNodePositions(
 
     const containerRect = container.getBoundingClientRect()
     const connections: WireConnection[] = []
+    const entryBadgeKeysByLabel = new Map<string, string[]>()
 
-    for (let i = 0; i < program.stateOrder.length - 1; i++) {
-      const stateName = program.stateOrder[i]
-      const nextStateName = program.stateOrder[i + 1]
+    for (const stateName of program.stateOrder) {
       const state = program.states[stateName]
-      const nextState = program.states[nextStateName]
-      if (!state || !nextState) continue
+      if (!state) continue
+
+      for (const instr of state.instructions) {
+        if (!instr.entryLabel) continue
+
+        const entryKey = `${stateName}:${instr.position}:entry`
+        const entryEl = badgeElements.current.get(entryKey)
+        if (!entryEl) continue
+
+        const existingKeys = entryBadgeKeysByLabel.get(instr.entryLabel) ?? []
+        existingKeys.push(entryKey)
+        entryBadgeKeysByLabel.set(instr.entryLabel, existingKeys)
+      }
+    }
+
+    for (const stateName of program.stateOrder) {
+      const state = program.states[stateName]
+      if (!state) continue
 
       for (const instr of state.instructions) {
         if (!instr.exitLabel) continue
@@ -57,25 +72,24 @@ export function useNodePositions(
         const exitEl = badgeElements.current.get(exitKey)
         if (!exitEl) continue
 
-        // Only connect to the next row's matching entry point
-        const entryIndex = nextState.entryPoints[instr.exitLabel]
-        if (entryIndex === undefined) continue
-
-        const entryKey = `${nextStateName}:${entryIndex}:entry`
-        const entryEl = badgeElements.current.get(entryKey)
-        if (!entryEl) continue
-
         const exitRect = exitEl.getBoundingClientRect()
-        const entryRect = entryEl.getBoundingClientRect()
+        const entryKeys = entryBadgeKeysByLabel.get(instr.exitLabel) ?? []
 
-        connections.push({
-          fromX: exitRect.left + exitRect.width / 2 - containerRect.left,
-          fromY: exitRect.top + exitRect.height - containerRect.top,
-          toX: entryRect.left + entryRect.width / 2 - containerRect.left,
-          toY: entryRect.top - containerRect.top,
-          label: instr.exitLabel,
-          color: getLabelColor(instr.exitLabel),
-        })
+        for (const entryKey of entryKeys) {
+          const entryEl = badgeElements.current.get(entryKey)
+          if (!entryEl) continue
+
+          const entryRect = entryEl.getBoundingClientRect()
+
+          connections.push({
+            fromX: exitRect.left + exitRect.width / 2 - containerRect.left,
+            fromY: exitRect.top + exitRect.height - containerRect.top,
+            toX: entryRect.left + entryRect.width / 2 - containerRect.left,
+            toY: entryRect.top - containerRect.top,
+            label: instr.exitLabel,
+            color: getLabelColor(instr.exitLabel),
+          })
+        }
       }
     }
 
